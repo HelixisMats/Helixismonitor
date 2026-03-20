@@ -3,7 +3,7 @@ mqtt_bridge.py
 ──────────────
 Subscribes to eaasy.life:1883 and mirrors every reading into Supabase.
 """
-
+ 
 import os
 import time
 import uuid
