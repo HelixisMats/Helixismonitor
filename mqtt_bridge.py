@@ -63,8 +63,10 @@ def on_message(client, userdata, msg):
         data = json.loads(payload)
         if isinstance(data, dict):
             for sensor, value in data.items():
+                if sensor == "timestamp":
+                    continue
                 try:
-                    rows.append({
+                    rows.append({ 
                         "sensor":     sensor,
                         "value":      float(value),
                         "topic":      msg.topic,
