@@ -52,7 +52,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    payload = msg.payload.decode("utf-8", errors="replace").strip()
+    payload = msg.payload.decode("utf-8", errors="ignore").strip()
     log.info(f"Message received on {msg.topic}: {payload[:120]}")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -63,8 +63,13 @@ def on_message(client, userdata, msg):
         data = json.loads(payload)
         if isinstance(data, dict):
             for sensor, value in data.items():
-                if sensor == "timestamp":
+                try:
+                    sensor_clean = sensor.encode("ascii", errors="ignore").decode("ascii")
+                except Exception:
                     continue
+                if not sensor_clean or sensor_clean == "timestamp":
+                    continue
+                sensor = sensor_clean
                 try:
                     rows.append({ 
                         "sensor":     sensor,
