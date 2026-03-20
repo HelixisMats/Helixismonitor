@@ -2,7 +2,7 @@
 mqtt_bridge.py
 ──────────────
 Subscribes to helix/1/1234/data on eaasy.life:1883
-and mirrors every sensor reading into Supabase.
+and inserts readings into Supabase via direct HTTP REST calls.
 """
 
 import os
@@ -10,10 +10,11 @@ import time
 import uuid
 import json
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
-from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,12 +37,30 @@ SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
 
 SKIP_FIELDS = {"timestamp", "time", "date"}
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
-def safe_str(s):
-    """Strip all non-ASCII characters from a string."""
-    return s.encode("ascii", errors="ignore").decode("ascii").strip()
+def insert_rows(rows):
+    """Insert rows into Supabase using plain urllib — no encoding issues."""
+    url = f"{SUPABASE_URL}/rest/v1/sensor_readings"
+    body = json.dumps(rows).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "apikey":        SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type":  "application/json",
+            "Prefer":        "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        log.error(f"Supabase HTTP error {e.code}: {body}")
+    except Exception as exc:
+        log.error(f"Supabase request error: {exc}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -60,9 +79,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     try:
-        raw = msg.payload.decode("utf-8", errors="ignore").strip()
-        # Force entire payload through ASCII to kill any stray characters
-        payload = raw.encode("ascii", errors="ignore").decode("ascii")
+        payload = msg.payload.decode("utf-8", errors="ignore").strip()
     except Exception as e:
         log.error(f"Payload decode error: {e}")
         return
@@ -74,16 +91,15 @@ def on_message(client, userdata, msg):
         data = json.loads(payload)
         if isinstance(data, dict):
             for sensor, value in data.items():
-                sensor_clean = safe_str(sensor)
-                if not sensor_clean:
-                    continue
-                if sensor_clean.lower() in SKIP_FIELDS:
+                # Keep only printable ASCII in sensor name
+                sensor_clean = "".join(c for c in sensor if 32 <= ord(c) < 128).strip()
+                if not sensor_clean or sensor_clean.lower() in SKIP_FIELDS:
                     continue
                 try:
                     rows.append({
                         "sensor":     sensor_clean,
                         "value":      float(value),
-                        "topic":      safe_str(msg.topic),
+                        "topic":      msg.topic,
                         "created_at": now,
                     })
                 except (ValueError, TypeError):
@@ -91,9 +107,9 @@ def on_message(client, userdata, msg):
     except json.JSONDecodeError:
         try:
             rows.append({
-                "sensor":     safe_str(msg.topic.split("/")[-1]),
+                "sensor":     msg.topic.split("/")[-1],
                 "value":      float(payload),
-                "topic":      safe_str(msg.topic),
+                "topic":      msg.topic,
                 "created_at": now,
             })
         except ValueError:
@@ -103,12 +119,10 @@ def on_message(client, userdata, msg):
     if not rows:
         return
 
-    try:
-        supabase.table("sensor_readings").insert(rows).execute()
+    status = insert_rows(rows)
+    if status and status < 300:
         for r in rows:
             log.info(f"  {r['sensor']:<22} = {r['value']}")
-    except Exception as exc:
-        log.error(f"Supabase insert error: {exc}")
 
 
 def main():
