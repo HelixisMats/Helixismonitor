@@ -45,27 +45,18 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── MQTT callbacks ─────────────────────────────────────────────
 
-def on_connect(client, userdata, flags, rc):
-    codes = {
-        0: "Connected ✓",
-        1: "Wrong protocol version",
-        2: "Client ID rejected",
-        3: "Broker unavailable",
-        4: "Bad username/password",
-        5: "Not authorised",
-    }
-    msg = codes.get(rc, f"Unknown rc={rc}")
-    if rc == 0:
-        log.info(f"{msg} → {MQTT_BROKER}:{MQTT_PORT}")
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        log.info(f"Connected ✓ → {MQTT_BROKER}:{MQTT_PORT}")
         client.subscribe(MQTT_TOPIC)
         log.info(f"Subscribed to  {MQTT_TOPIC}")
     else:
-        log.error(f"Connection failed: {msg}")
+        log.error(f"Connection failed: reason_code={reason_code}")
 
 
-def on_disconnect(client, userdata, rc):
-    if rc != 0:
-        log.warning(f"Unexpected disconnect (rc={rc}). Will reconnect…")
+def on_disconnect(client, userdata, flags, reason_code, properties):
+    if reason_code != 0:
+        log.warning(f"Unexpected disconnect (rc={reason_code}). Will reconnect…")
 
 
 def on_message(client, userdata, msg):
@@ -96,7 +87,11 @@ def on_message(client, userdata, msg):
 # ── Main loop with auto-reconnect ─────────────────────────────
 
 def main():
-    client = mqtt.Client(client_id="helix-bridge-v1", clean_session=True)
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id="helix-bridge-v1",
+        clean_session=True,
+    )
 
     if MQTT_USERNAME:
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
