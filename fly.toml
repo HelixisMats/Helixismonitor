@@ -1,0 +1,18 @@
+app = "helixismonitor"
+primary_region = "arn"
+
+[build]
+
+[processes]
+  worker = "python mqtt_bridge.py"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[http_service]
+  force_https = false
+  internal_port = 8080
+  auto_stop_machines = false
+  auto_start_machines = true
