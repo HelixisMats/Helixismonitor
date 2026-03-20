@@ -39,13 +39,9 @@ SKIP_FIELDS = {"timestamp", "time", "date"}
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def clean_key(s):
-    """Return ASCII-safe key or None if unusable."""
-    try:
-        cleaned = s.encode("ascii", errors="ignore").decode("ascii").strip()
-        return cleaned if cleaned else None
-    except Exception:
-        return None
+def safe_str(s):
+    """Strip all non-ASCII characters from a string."""
+    return s.encode("ascii", errors="ignore").decode("ascii").strip()
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -63,7 +59,14 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    payload = msg.payload.decode("utf-8", errors="ignore").strip()
+    try:
+        raw = msg.payload.decode("utf-8", errors="ignore").strip()
+        # Force entire payload through ASCII to kill any stray characters
+        payload = raw.encode("ascii", errors="ignore").decode("ascii")
+    except Exception as e:
+        log.error(f"Payload decode error: {e}")
+        return
+
     now = datetime.now(timezone.utc).isoformat()
     rows = []
 
@@ -71,7 +74,7 @@ def on_message(client, userdata, msg):
         data = json.loads(payload)
         if isinstance(data, dict):
             for sensor, value in data.items():
-                sensor_clean = clean_key(sensor)
+                sensor_clean = safe_str(sensor)
                 if not sensor_clean:
                     continue
                 if sensor_clean.lower() in SKIP_FIELDS:
@@ -80,19 +83,17 @@ def on_message(client, userdata, msg):
                     rows.append({
                         "sensor":     sensor_clean,
                         "value":      float(value),
-                        "topic":      msg.topic,
+                        "topic":      safe_str(msg.topic),
                         "created_at": now,
                     })
                 except (ValueError, TypeError):
                     log.debug(f"Skipping non-numeric: {sensor_clean}={value!r}")
-        else:
-            log.warning(f"Unexpected JSON type: {type(data)}")
     except json.JSONDecodeError:
         try:
             rows.append({
-                "sensor":     msg.topic.split("/")[-1],
+                "sensor":     safe_str(msg.topic.split("/")[-1]),
                 "value":      float(payload),
-                "topic":      msg.topic,
+                "topic":      safe_str(msg.topic),
                 "created_at": now,
             })
         except ValueError:
