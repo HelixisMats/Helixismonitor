@@ -1,12 +1,14 @@
 """
 mqtt_bridge.py
 ──────────────
-Subscribes to eaasy.life:1883 and mirrors every reading into Supabase.
+Subscribes to helix/1/1234/data on eaasy.life:1883
+and mirrors every sensor reading into Supabase.
 """
- 
+
 import os
 import time
 import uuid
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -25,19 +27,12 @@ log = logging.getLogger(__name__)
 
 MQTT_BROKER   = os.getenv("MQTT_BROKER",   "eaasy.life")
 MQTT_PORT     = int(os.getenv("MQTT_PORT", 1883))
+MQTT_TOPIC    = os.getenv("MQTT_TOPIC",    "helix/1/1234/data")
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
-
-# Subscribe to each sensor individually to avoid wildcard restrictions
-SENSORS = [
-    "Energifaktor", "wind", "pressure", "temp_right_coll", "temp_left_coll",
-    "temp_tank", "temp_difference", "temp_return", "temp_forward",
-    "flow", "power", "volume", "heat_energy", "temp_cell", "irradiance",
-]
-TOPICS = [f"testnod-mqtt-helix/{s}" for s in SENSORS]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -45,9 +40,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         log.info(f"Connected ✓ → {MQTT_BROKER}:{MQTT_PORT}")
-        for topic in TOPICS:
-            client.subscribe(topic, qos=0)
-            log.info(f"  Subscribed: {topic}")
+        client.subscribe(MQTT_TOPIC, qos=0)
+        log.info(f"Subscribed to: {MQTT_TOPIC}")
     else:
         log.error(f"Connection failed: reason_code={reason_code}")
 
@@ -58,30 +52,53 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    topic   = msg.topic
-    sensor  = topic.split("/")[-1]
     payload = msg.payload.decode("utf-8", errors="replace").strip()
+    log.info(f"Message received on {msg.topic}: {payload[:120]}")
 
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+
+    # Try JSON first (all sensors in one message)
     try:
-        value = float(payload)
-    except ValueError:
-        log.debug(f"Skipping non-numeric payload on {topic!r}: {payload!r}")
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            for sensor, value in data.items():
+                try:
+                    rows.append({
+                        "sensor":     sensor,
+                        "value":      float(value),
+                        "topic":      msg.topic,
+                        "created_at": now,
+                    })
+                except (ValueError, TypeError):
+                    log.debug(f"Skipping non-numeric field {sensor!r}: {value!r}")
+        else:
+            log.warning(f"Unexpected JSON structure: {type(data)}")
+    except json.JSONDecodeError:
+        # Fallback: plain numeric value, use last topic segment as sensor name
+        try:
+            rows.append({
+                "sensor":     msg.topic.split("/")[-1],
+                "value":      float(payload),
+                "topic":      msg.topic,
+                "created_at": now,
+            })
+        except ValueError:
+            log.warning(f"Could not parse payload: {payload!r}")
+            return
+
+    if not rows:
         return
 
     try:
-        supabase.table("sensor_readings").insert({
-            "sensor":     sensor,
-            "value":      value,
-            "topic":      topic,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        log.info(f"  {sensor:<22} = {value}")
+        supabase.table("sensor_readings").insert(rows).execute()
+        for r in rows:
+            log.info(f"  ✓ {r['sensor']:<22} = {r['value']}")
     except Exception as exc:
-        log.error(f"Supabase insert error for {sensor!r}: {exc}")
+        log.error(f"Supabase insert error: {exc}")
 
 
 def main():
-    # Random client ID avoids conflicts with other connected clients
     client_id = f"helix-bridge-{uuid.uuid4().hex[:8]}"
     log.info(f"Client ID: {client_id}")
 
