@@ -34,12 +34,23 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
 
+SKIP_FIELDS = {"timestamp", "time", "date"}
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def clean_key(s):
+    """Return ASCII-safe key or None if unusable."""
+    try:
+        cleaned = s.encode("ascii", errors="ignore").decode("ascii").strip()
+        return cleaned if cleaned else None
+    except Exception:
+        return None
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
-        log.info(f"Connected ✓ → {MQTT_BROKER}:{MQTT_PORT}")
+        log.info(f"Connected to {MQTT_BROKER}:{MQTT_PORT}")
         client.subscribe(MQTT_TOPIC, qos=0)
         log.info(f"Subscribed to: {MQTT_TOPIC}")
     else:
@@ -48,41 +59,35 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 def on_disconnect(client, userdata, flags, reason_code, properties):
     if reason_code != 0:
-        log.warning(f"Unexpected disconnect (rc={reason_code}). Will reconnect…")
+        log.warning(f"Unexpected disconnect (rc={reason_code}). Will reconnect...")
 
 
 def on_message(client, userdata, msg):
     payload = msg.payload.decode("utf-8", errors="ignore").strip()
-    log.info(f"Message received on {msg.topic}: {payload[:120]}")
-
     now = datetime.now(timezone.utc).isoformat()
     rows = []
 
-    # Try JSON first (all sensors in one message)
     try:
         data = json.loads(payload)
         if isinstance(data, dict):
             for sensor, value in data.items():
-                try:
-                    sensor_clean = sensor.encode("ascii", errors="ignore").decode("ascii")
-                except Exception:
+                sensor_clean = clean_key(sensor)
+                if not sensor_clean:
                     continue
-                if not sensor_clean or sensor_clean == "timestamp":
+                if sensor_clean.lower() in SKIP_FIELDS:
                     continue
-                sensor = sensor_clean
                 try:
-                    rows.append({ 
-                        "sensor":     sensor,
+                    rows.append({
+                        "sensor":     sensor_clean,
                         "value":      float(value),
                         "topic":      msg.topic,
                         "created_at": now,
                     })
                 except (ValueError, TypeError):
-                    log.debug(f"Skipping non-numeric field {sensor!r}: {value!r}")
+                    log.debug(f"Skipping non-numeric: {sensor_clean}={value!r}")
         else:
-            log.warning(f"Unexpected JSON structure: {type(data)}")
+            log.warning(f"Unexpected JSON type: {type(data)}")
     except json.JSONDecodeError:
-        # Fallback: plain numeric value, use last topic segment as sensor name
         try:
             rows.append({
                 "sensor":     msg.topic.split("/")[-1],
@@ -100,7 +105,7 @@ def on_message(client, userdata, msg):
     try:
         supabase.table("sensor_readings").insert(rows).execute()
         for r in rows:
-            log.info(f"  ✓ {r['sensor']:<22} = {r['value']}")
+            log.info(f"  {r['sensor']:<22} = {r['value']}")
     except Exception as exc:
         log.error(f"Supabase insert error: {exc}")
 
@@ -117,13 +122,12 @@ def main():
 
     if MQTT_USERNAME:
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-        log.info(f"Using MQTT credentials for user: {MQTT_USERNAME}")
 
     client.on_connect    = on_connect
     client.on_disconnect = on_disconnect
     client.on_message    = on_message
 
-    log.info(f"Connecting to {MQTT_BROKER}:{MQTT_PORT} …")
+    log.info(f"Connecting to {MQTT_BROKER}:{MQTT_PORT} ...")
 
     retry_delay = 5
     while True:
@@ -132,11 +136,11 @@ def main():
             retry_delay = 5
             client.loop_forever()
         except OSError as exc:
-            log.error(f"Network error: {exc}. Retrying in {retry_delay}s…")
+            log.error(f"Network error: {exc}. Retrying in {retry_delay}s...")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60)
         except KeyboardInterrupt:
-            log.info("Shutting down bridge.")
+            log.info("Shutting down.")
             client.disconnect()
             break
 
