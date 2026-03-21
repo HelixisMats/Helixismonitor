@@ -64,7 +64,7 @@ def get_db():
 db = get_db()
 
 def fetch_data(hours):
-       try:
+    try:
         res = db.table("sensor_readings").select("created_at,sensor,value") \
             .order("created_at", desc=True).limit(5000).execute()
     except Exception as exc:
