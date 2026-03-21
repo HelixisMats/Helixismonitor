@@ -1,5 +1,6 @@
 """
 streamlit_app.py — Helix Solar Thermal Monitor
+Clean gauge dashboard with optional numeric view.
 """
 
 import streamlit as st
@@ -9,27 +10,38 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 
 st.set_page_config(
-    page_title="Helix Solar Thermal Monitor",
+    page_title="Helix Monitor",
     page_icon="☀️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
 <style>
-  .block-container { padding-top: 1.2rem; }
+  .block-container { padding-top: 1rem; padding-bottom: 1rem; }
   div[data-testid="metric-container"] {
     background: #f8f9fa;
     border: 1px solid #e9ecef;
     border-radius: 10px;
-    padding: 12px 16px;
+    padding: 10px 14px;
   }
-  div[data-testid="metric-container"] label { font-size: 0.75rem; color: #6c757d; }
-  .explain { font-size: 0.82rem; color: #6c757d; margin-top: -8px; margin-bottom: 12px; }
-  .system-status { padding: 10px 16px; border-radius: 8px; margin-bottom: 8px; font-size: 0.9rem; }
-  .status-good  { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-  .status-warn  { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
-  .status-idle  { background: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
+  .status-bar {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    margin-bottom: 12px;
+  }
+  .status-good { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
+  .status-warn { background:#fff3cd; color:#856404; border:1px solid #ffeeba; }
+  .status-idle { background:#e2e3e5; color:#383d41; border:1px solid #d6d8db; }
+  .section-title {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #6c757d;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 16px 0 8px 2px;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,83 +78,79 @@ def latest(df, sensor):
     return float(sub["value"].iloc[-1]) if not sub.empty else None
 
 def fmt(val, decimals=1, unit=""):
-    if val is None:
-        return "—"
+    if val is None: return "—"
     return f"{val:.{decimals}f} {unit}".strip()
 
-def system_status(power, irradiance, dt):
-    if power is None:
-        return "idle", "⚫ No data"
-    if irradiance and irradiance > 200 and power > 1.0:
-        return "good", f"🟢 System actively harvesting solar energy"
-    if irradiance and irradiance > 50:
-        return "warn", f"🟡 Low solar irradiance — limited energy collection"
-    return "idle", "⚪ System idle — insufficient sunlight"
-
-def make_chart(df, sensors, colors, y_label, height=360, fill=False):
+# ── Gauge helpers ─────────────────────────────────────────────
+def thermometer(label, val, min_val, max_val, color, height=200):
+    pct = max(0, min(1, (val - min_val) / (max_val - min_val))) if val is not None else 0
     fig = go.Figure()
-    for s, color in zip(sensors, colors):
+    fig.add_trace(go.Indicator(
+        mode="gauge+number",
+        value=val if val is not None else 0,
+        number={"suffix": "°C", "font": {"size": 18, "color": color}},
+        gauge={
+            "axis": {"range": [min_val, max_val], "tickwidth": 1, "tickcolor": "#ccc", "tickfont": {"size": 9}},
+            "bar": {"color": color, "thickness": 0.25},
+            "bgcolor": "#f0f0f0",
+            "borderwidth": 0,
+            "shape": "bullet",
+            "threshold": {"line": {"color": color, "width": 2}, "thickness": 0.75, "value": val or 0},
+        },
+        title={"text": label, "font": {"size": 11, "color": "#888"}},
+        domain={"x": [0, 1], "y": [0, 1]},
+    ))
+    fig.update_layout(
+        height=100, margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", font_color="#333",
+    )
+    return fig
+
+def gauge(label, val, min_val, max_val, unit, color, sub_text="", height=200):
+    pct = max(0, min(1, (val - min_val) / (max_val - min_val))) if val is not None else 0
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=val if val is not None else 0,
+        number={"suffix": f" {unit}", "font": {"size": 22, "color": color}},
+        gauge={
+            "axis": {"range": [min_val, max_val], "tickwidth": 1, "tickfont": {"size": 9}},
+            "bar": {"color": color},
+            "bgcolor": "#f0f0f0",
+            "borderwidth": 0,
+            "steps": [{"range": [min_val, max_val], "color": "#f0f0f0"}],
+        },
+        title={"text": f"{label}<br><span style='font-size:11px;color:#999'>{sub_text}</span>",
+               "font": {"size": 12, "color": "#666"}},
+    ))
+    fig.update_layout(
+        height=height, margin=dict(l=20, r=20, t=50, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+def line_chart(df, sensors, colors, y_label, height=280):
+    labels = {
+        "temp_right_coll": "Coll. Right", "temp_left_coll": "Coll. Left",
+        "temp_tank": "Tank", "temp_forward": "Forward", "temp_return": "Return",
+        "temp_cell": "Cell", "temp_difference": "ΔT",
+        "power": "Power", "flow": "Flow", "irradiance": "Irradiance",
+        "wind": "Wind", "pressure": "Pressure", "heat_energy": "Heat Energy",
+    }
+    fig = go.Figure()
+    for s, c in zip(sensors, colors):
         sub = df[df["sensor"] == s]
-        if sub.empty:
-            continue
-        label = {
-            "temp_right_coll": "Collector Right",
-            "temp_left_coll":  "Collector Left",
-            "temp_tank":       "Storage Tank",
-            "temp_forward":    "Forward (to tank)",
-            "temp_return":     "Return (from tank)",
-            "temp_cell":       "Solar Cell",
-            "temp_difference": "ΔT Forward−Return",
-            "power":           "Thermal Power",
-            "flow":            "Flow Rate",
-            "heat_energy":     "Accumulated Heat",
-            "irradiance":      "Solar Irradiance",
-            "wind":            "Wind Speed",
-            "pressure":        "System Pressure",
-        }.get(s, s)
+        if sub.empty: continue
         fig.add_trace(go.Scatter(
             x=sub["created_at"], y=sub["value"],
-            name=label, mode="lines",
-            fill="tozeroy" if fill else "none",
-            line=dict(width=2, color=color),
+            name=labels.get(s, s), mode="lines",
+            line=dict(width=2, color=c),
         ))
     fig.update_layout(
-        height=height,
-        margin=dict(l=0, r=0, t=10, b=0),
+        height=height, margin=dict(l=0, r=0, t=10, b=0),
         yaxis_title=y_label,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="#e9ecef")
-    return fig
-
-def make_dual_chart(df, s_left, s_right, label_left, label_right,
-                    color_left, color_right, height=360):
-    fig = go.Figure()
-    for s, yax, color, lbl in [
-        (s_left,  "y",  color_left,  label_left),
-        (s_right, "y2", color_right, label_right),
-    ]:
-        sub = df[df["sensor"] == s]
-        if sub.empty:
-            continue
-        fig.add_trace(go.Scatter(
-            x=sub["created_at"], y=sub["value"],
-            name=lbl, mode="lines",
-            line=dict(width=2, color=color), yaxis=yax,
-        ))
-    fig.update_layout(
-        height=height,
-        margin=dict(l=0, r=0, t=10, b=0),
-        yaxis=dict(title=label_left,  color=color_left),
-        yaxis2=dict(title=label_right, color=color_right, overlaying="y", side="right"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        hovermode="x unified",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(gridcolor="#e9ecef")
@@ -151,219 +159,179 @@ def make_dual_chart(df, s_left, s_right, label_left, label_right,
 # ── Sidebar ───────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    hours = st.selectbox(
-        "Time window",
-        options=[1, 6, 12, 24, 48, 168],
-        index=3,
-        format_func=lambda h: f"{h}h" if h < 24 else f"{h//24} day{'s' if h>24 else ''}",
-    )
-    auto_refresh = st.checkbox("Auto-refresh every 60s", value=True)
-    if st.button("🔄 Refresh now"):
+    hours = st.selectbox("Time window",
+        options=[1, 6, 12, 24, 48, 168], index=3,
+        format_func=lambda h: f"{h}h" if h < 24 else f"{h//24}d")
+    auto_refresh = st.checkbox("Auto-refresh 60s", value=True)
+    if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
     st.divider()
-    st.caption("**System:** Solar thermal concentrator")
-    st.caption("**Node:** `testnod-mqtt-helix`")
-    st.caption("**Broker:** `eaasy.life:1883`")
-    st.divider()
-    st.markdown("""
-**How it works:**
-Solar collectors heat a fluid which flows through pipes to a storage tank.
-An energy meter measures the heat transferred based on flow rate × temperature difference.
-""")
+    st.caption("Solar thermal concentrator")
+    st.caption("`helix/1/1234/data`")
 
 if auto_refresh:
     st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 # ── Load data ─────────────────────────────────────────────────
 df = fetch_data(hours)
-
 if df.empty:
-    st.warning("⚠️ No data received yet.")
+    st.warning("⚠️ No data yet.")
     st.stop()
 
-# Latest values
 v = {s: latest(df, s) for s in df["sensor"].unique()}
 last_ts = df["created_at"].max().astimezone(timezone.utc)
 
 # ── Header ────────────────────────────────────────────────────
-col_title, col_ts = st.columns([3, 1])
-col_title.title("☀️ Helix Solar Thermal Monitor")
-col_ts.markdown(
-    f"<div style='text-align:right; padding-top:18px; color:#6c757d; font-size:0.85rem'>"
-    f"Last reading<br><b>{last_ts.strftime('%H:%M:%S')} UTC</b></div>",
+h_col, ts_col, view_col = st.columns([3, 2, 1])
+h_col.title("☀️ Helix Monitor")
+ts_col.markdown(
+    f"<div style='padding-top:18px;color:#6c757d;font-size:0.82rem'>"
+    f"Last update: <b>{last_ts.strftime('%H:%M:%S')} UTC</b></div>",
     unsafe_allow_html=True,
 )
 
-# ── System status banner ──────────────────────────────────────
-status_type, status_msg = system_status(v.get("power"), v.get("irradiance"), v.get("temp_difference"))
-st.markdown(f'<div class="system-status status-{status_type}">{status_msg}</div>', unsafe_allow_html=True)
+# View toggle
+if "view" not in st.session_state:
+    st.session_state.view = "gauges"
+if view_col.button("📊 Switch view"):
+    st.session_state.view = "numeric" if st.session_state.view == "gauges" else "gauges"
 
-st.divider()
-
-# ══════════════════════════════════════════════════════════════
-# SECTION 1 — Solar & Environment
-# ══════════════════════════════════════════════════════════════
-st.subheader("☀️ Solar & Weather Conditions")
-st.markdown('<p class="explain">External conditions driving the system. Irradiance is the amount of solar energy hitting the collectors — above ~200 W/m² the system starts collecting meaningfully.</p>', unsafe_allow_html=True)
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Solar Irradiance", fmt(v.get("irradiance"), 0, "W/m²"),
-          help="Solar power per square metre hitting the collector surface. Peak clear-sky value is ~1000 W/m².")
-c2.metric("Solar Cell Temp", fmt(v.get("temp_cell"), 1, "°C"),
-          help="Temperature of the photovoltaic/thermal cell on the collector. High values may indicate low efficiency.")
-c3.metric("Wind Speed", fmt(v.get("wind"), 2, "m/s"),
-          help="Wind causes heat loss from the collectors. Higher wind = lower efficiency.")
-c4.metric("System Pressure", fmt(v.get("pressure"), 2, "bar"),
-          help="Hydraulic pressure in the fluid circuit. Should remain stable. Large changes may indicate a fault.")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════
-# SECTION 2 — Collector Temperatures
-# ══════════════════════════════════════════════════════════════
-st.subheader("🌡️ Collector Temperatures")
-st.markdown('<p class="explain">Temperature at the solar collectors — the hot end of the system. The fluid is heated here and pumped toward the storage tank. Left and right sensors monitor each side of the collector array independently.</p>', unsafe_allow_html=True)
-
-c1, c2 = st.columns(2)
-c1.metric("Collector Right", fmt(v.get("temp_right_coll"), 1, "°C"),
-          help="Outlet temperature on the right side of the collector array.")
-c2.metric("Collector Left", fmt(v.get("temp_left_coll"), 1, "°C"),
-          help="Outlet temperature on the left side of the collector array. Should be close to Right — large differences may indicate shading or flow issues.")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════
-# SECTION 3 — Heat Transfer Circuit
-# ══════════════════════════════════════════════════════════════
-st.subheader("🔁 Heat Transfer Circuit")
-st.markdown('<p class="explain">The fluid loop between collectors and storage tank. Forward is the hot fluid going toward the tank; Return is the cooler fluid coming back. The temperature difference (ΔT) is key — a larger ΔT means more energy is being transferred per litre of flow.</p>', unsafe_allow_html=True)
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Forward Temp", fmt(v.get("temp_forward"), 1, "°C"),
-          help="Temperature of fluid leaving the collectors toward the storage tank. This is the hottest point in the circuit.")
-c2.metric("Return Temp", fmt(v.get("temp_return"), 1, "°C"),
-          help="Temperature of fluid returning from the tank back to the collectors. Lower than forward — it has given up its heat.")
-dt = v.get("temp_difference")
-c3.metric("ΔT (Forward − Return)", fmt(dt, 2, "°C"),
-          delta=None,
-          help="The temperature drop across the heat exchanger. Multiplied by flow rate, this gives you the thermal power output.")
-c4.metric("Flow Rate", fmt(v.get("flow"), 3, "m³/h"),
-          help="Volume of fluid circulating per hour. Together with ΔT, this determines how much heat is being moved.")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════
-# SECTION 4 — Storage Tank
-# ══════════════════════════════════════════════════════════════
-st.subheader("🪣 Storage Tank")
-st.markdown('<p class="explain">The thermal storage — where collected solar energy is stored as hot water. The tank temperature rises as the system collects energy throughout the day.</p>', unsafe_allow_html=True)
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Tank Temperature", fmt(v.get("temp_tank"), 1, "°C"),
-          help="Current temperature of the storage tank. A healthy solar day should raise this significantly from morning to afternoon.")
-c2.metric("Stored Volume", fmt(v.get("volume"), 1, "L"),
-          help="Volume of fluid in the system. Should remain stable — changes may indicate leaks.")
-
-# Energifaktor is a cumulative Wh counter — convert to kWh
-ef = v.get("Energifaktor")
-ef_kwh = ef / 1000 if ef is not None else None
-c3.metric("Energy Counter", fmt(ef_kwh, 2, "kWh"),
-          help="Cumulative energy count from the meter (converted from Wh). This counter increments over time and may be reset periodically.")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════
-# SECTION 5 — Power Output
-# ══════════════════════════════════════════════════════════════
-st.subheader("⚡ Thermal Power Output")
-st.markdown('<p class="explain">Real-time energy harvest. Power is calculated by the energy meter from flow rate × ΔT × fluid heat capacity. Heat energy is the accumulated total since the last meter reset.</p>', unsafe_allow_html=True)
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Thermal Power", fmt(v.get("power"), 2, "kW"),
-          help="Current rate of heat collection. Calculated by the energy meter as: Flow × ΔT × fluid specific heat capacity.")
-c2.metric("Accumulated Heat", fmt(v.get("heat_energy"), 3, "kWh"),
-          help="Total heat energy collected since the last meter reset. This is the most meaningful measure of daily solar yield.")
-
-# Efficiency estimate: power / (irradiance * assumed collector area)
-# We don't know collector area, so show power/irradiance ratio as a proxy
-irr = v.get("irradiance")
+# System status
 pwr = v.get("power")
-if irr and pwr and irr > 50:
-    efficiency_proxy = (pwr * 1000) / irr  # W per W/m² = effective m²
-    c3.metric("Effective Collector Output", fmt(efficiency_proxy, 2, "kW per kW/m²"),
-              help="Ratio of thermal power output to solar irradiance. Indicates how effectively the collectors are converting available sunlight.")
+irr = v.get("irradiance")
+if pwr and irr and irr > 200 and pwr > 1.0:
+    st.markdown('<div class="status-bar status-good">🟢 System actively harvesting solar energy</div>', unsafe_allow_html=True)
+elif irr and irr > 50:
+    st.markdown('<div class="status-bar status-warn">🟡 Low irradiance — limited collection</div>', unsafe_allow_html=True)
 else:
-    c3.metric("Effective Collector Output", "—",
-              help="Not available when irradiance is too low.")
-
-st.divider()
+    st.markdown('<div class="status-bar status-idle">⚪ System idle — insufficient sunlight</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
-# CHARTS
+# GAUGE VIEW
 # ══════════════════════════════════════════════════════════════
-st.subheader("📈 Historical Trends")
+if st.session_state.view == "gauges":
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🌡️ Temperatures",
-    "⚡ Power & Flow",
-    "☀️ Solar vs Output",
-    "🔁 ΔT & Efficiency",
-])
+    # Temperatures
+    st.markdown('<div class="section-title">🌡️ Temperatures</div>', unsafe_allow_html=True)
+    tc = st.columns(5)
+    temp_sensors = [
+        ("Coll. Right", "temp_right_coll", "#e74c3c", 0, 100),
+        ("Coll. Left",  "temp_left_coll",  "#e67e22", 0, 100),
+        ("Forward",     "temp_forward",     "#e74c3c", 0, 100),
+        ("Return",      "temp_return",      "#3498db", 0, 100),
+        ("Tank",        "temp_tank",        "#1D9E75", 10, 80),
+    ]
+    for col, (lbl, sensor, color, mn, mx) in zip(tc, temp_sensors):
+        val = v.get(sensor)
+        col.plotly_chart(thermometer(lbl, val, mn, mx, color), use_container_width=True, config={"displayModeBar": False})
 
-with tab1:
-    st.caption("All temperature sensors over time. Collector temps should track irradiance; tank temp should rise steadily during daylight hours.")
-    st.plotly_chart(
-        make_chart(df,
-            ["temp_right_coll", "temp_left_coll", "temp_forward", "temp_return", "temp_tank", "temp_cell"],
-            ["#e74c3c", "#c0392b", "#e67e22", "#3498db", "#2ecc71", "#9b59b6"],
-            "Temperature (°C)"),
-        use_container_width=True,
-    )
-
-with tab2:
-    st.caption("Thermal power output and fluid flow rate. Power = Flow × ΔT × heat capacity. Both should track solar irradiance closely.")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.caption("**Thermal Power (kW)**")
+    # Flow & Power
+    st.markdown('<div class="section-title">⚡ Flow & Power</div>', unsafe_allow_html=True)
+    fc1, fc2 = st.columns(2)
+    with fc1:
         st.plotly_chart(
-            make_chart(df, ["power"], ["#f39c12"], "kW", height=300, fill=True),
-            use_container_width=True,
+            gauge("Flow rate", v.get("flow"), 0, 1, "m³/h", "#3498db", "Normal flow"),
+            use_container_width=True, config={"displayModeBar": False}
         )
-    with col_b:
-        st.caption("**Flow Rate (m³/h)**")
+    with fc2:
         st.plotly_chart(
-            make_chart(df, ["flow"], ["#3498db"], "m³/h", height=300, fill=True),
-            use_container_width=True,
+            gauge("Thermal power", v.get("power"), 0, 10, "kW", "#e74c3c", "Active collection"),
+            use_container_width=True, config={"displayModeBar": False}
         )
 
-with tab3:
-    st.caption("Solar irradiance vs thermal power output. These should correlate strongly — gaps indicate shading, cloud cover, or system inefficiency.")
-    st.plotly_chart(
-        make_dual_chart(df, "irradiance", "power",
-                        "Irradiance (W/m²)", "Power (kW)",
-                        "#f1c40f", "#e74c3c"),
-        use_container_width=True,
-    )
+    # Energy
+    st.markdown('<div class="section-title">🔋 Energy harvest</div>', unsafe_allow_html=True)
+    ec1, ec2, ec3 = st.columns(3)
+    ef = v.get("Energifaktor")
+    ec1.metric("Accumulated heat", fmt(v.get("heat_energy"), 3, "kWh"))
+    ec2.metric("Energy counter", fmt(ef/1000 if ef else None, 2, "kWh") if ef else "—")
+    ec3.metric("ΔT Forward−Return", fmt(v.get("temp_difference"), 2, "°C"))
 
-with tab4:
-    st.caption("ΔT (temperature difference forward−return) shows how much heat is being extracted per litre of flow. Low ΔT with high flow = efficient bulk transfer. High ΔT with low flow = slower but hotter.")
-    st.plotly_chart(
-        make_dual_chart(df, "temp_difference", "flow",
-                        "ΔT (°C)", "Flow (m³/h)",
-                        "#e74c3c", "#3498db"),
-        use_container_width=True,
-    )
+    # Environment
+    st.markdown('<div class="section-title">🌤️ Environment</div>', unsafe_allow_html=True)
+    env1, env2, env3, env4 = st.columns(4)
+    env1.metric("Solar irradiance", fmt(v.get("irradiance"), 0, "W/m²"))
+    env2.metric("Wind", fmt(v.get("wind"), 2, "m/s"))
+    env3.metric("Pressure", fmt(v.get("pressure"), 2, "bar"))
+    env4.metric("Volume", fmt(v.get("volume"), 1, "L"))
 
-# ── Raw data ──────────────────────────────────────────────────
-with st.expander("📥 Raw data & export"):
-    pivot = df.pivot_table(
-        index="created_at", columns="sensor", values="value", aggfunc="last"
-    ).reset_index().sort_values("created_at", ascending=False)
-    st.dataframe(pivot.head(300), use_container_width=True)
-    st.download_button(
-        label="⬇️ Download CSV",
-        data=df.to_csv(index=False),
-        file_name=f"helix_{hours}h.csv",
-        mime="text/csv",
-    )
+    # Charts
+    st.divider()
+    st.markdown('<div class="section-title">📈 Trends</div>', unsafe_allow_html=True)
+    t1, t2, t3 = st.tabs(["🌡️ Temperatures", "⚡ Power & Flow", "☀️ Solar vs Power"])
+    with t1:
+        st.plotly_chart(line_chart(df,
+            ["temp_right_coll", "temp_left_coll", "temp_forward", "temp_return", "temp_tank"],
+            ["#e74c3c", "#e67e22", "#f39c12", "#3498db", "#1D9E75"], "°C"),
+            use_container_width=True)
+    with t2:
+        ca, cb = st.columns(2)
+        with ca:
+            st.plotly_chart(line_chart(df, ["power"], ["#e74c3c"], "kW", height=250), use_container_width=True)
+        with cb:
+            st.plotly_chart(line_chart(df, ["flow"], ["#3498db"], "m³/h", height=250), use_container_width=True)
+    with t3:
+        fig_dual = go.Figure()
+        for s, color, yax, name in [
+            ("irradiance", "#f1c40f", "y",  "Irradiance (W/m²)"),
+            ("power",      "#e74c3c", "y2", "Power (kW)"),
+        ]:
+            sub = df[df["sensor"] == s]
+            if not sub.empty:
+                fig_dual.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
+                    name=name, mode="lines", line=dict(width=2, color=color), yaxis=yax))
+        fig_dual.update_layout(
+            height=280, margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="W/m²", color="#f1c40f"),
+            yaxis2=dict(title="kW", color="#e74c3c", overlaying="y", side="right"),
+            hovermode="x unified", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        fig_dual.update_xaxes(showgrid=False)
+        fig_dual.update_yaxes(gridcolor="#e9ecef")
+        st.plotly_chart(fig_dual, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════
+# NUMERIC VIEW
+# ══════════════════════════════════════════════════════════════
+else:
+    st.subheader("☀️ Solar & Environment")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Irradiance", fmt(v.get("irradiance"), 0, "W/m²"), help="Solar power per m² hitting collectors.")
+    c2.metric("Cell temp", fmt(v.get("temp_cell"), 1, "°C"), help="Solar cell temperature.")
+    c3.metric("Wind", fmt(v.get("wind"), 2, "m/s"), help="Higher wind = more heat loss.")
+    c4.metric("Pressure", fmt(v.get("pressure"), 2, "bar"), help="System hydraulic pressure.")
+    st.divider()
+
+    st.subheader("🌡️ Temperatures")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Coll. Right", fmt(v.get("temp_right_coll"), 1, "°C"))
+    c2.metric("Coll. Left", fmt(v.get("temp_left_coll"), 1, "°C"))
+    c3.metric("Forward", fmt(v.get("temp_forward"), 1, "°C"))
+    c4.metric("Return", fmt(v.get("temp_return"), 1, "°C"))
+    c5.metric("Tank", fmt(v.get("temp_tank"), 1, "°C"))
+    st.divider()
+
+    st.subheader("🔁 Heat Transfer")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("ΔT Forward−Return", fmt(v.get("temp_difference"), 2, "°C"), help="Temperature drop = energy transferred.")
+    c2.metric("Flow rate", fmt(v.get("flow"), 3, "m³/h"), help="Fluid flow per hour.")
+    c3.metric("System pressure", fmt(v.get("pressure"), 2, "bar"))
+    st.divider()
+
+    st.subheader("⚡ Power & Energy")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Thermal power", fmt(v.get("power"), 2, "kW"), help="Current rate of heat collection.")
+    c2.metric("Heat energy", fmt(v.get("heat_energy"), 3, "kWh"), help="Accumulated heat since reset.")
+    ef = v.get("Energifaktor")
+    c3.metric("Energy counter", fmt(ef/1000 if ef else None, 2, "kWh"))
+    c4.metric("Volume", fmt(v.get("volume"), 1, "L"))
+
+    with st.expander("📥 Raw data & export"):
+        pivot = df.pivot_table(
+            index="created_at", columns="sensor", values="value", aggfunc="last"
+        ).reset_index().sort_values("created_at", ascending=False)
+        st.dataframe(pivot.head(300), use_container_width=True)
+        st.download_button("⬇️ Download CSV", df.to_csv(index=False),
+            file_name=f"helix_{hours}h.csv", mime="text/csv")
