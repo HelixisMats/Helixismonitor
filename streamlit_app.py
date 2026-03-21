@@ -64,10 +64,9 @@ def get_db():
 db = get_db()
 
 def fetch_data(hours):
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    try:
+       try:
         res = db.table("sensor_readings").select("created_at,sensor,value") \
-            .gte("created_at", since).order("created_at").limit(50_000).execute()
+            .order("created_at", desc=True).limit(5000).execute()
     except Exception as exc:
         st.error(f"Database error: {exc}"); return pd.DataFrame()
     if not res.data: return pd.DataFrame()
