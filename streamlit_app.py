@@ -87,6 +87,7 @@ def fetch_today():
     if not res.data: return pd.DataFrame()
     df = pd.DataFrame(res.data)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    df = df.sort_values("created_at")
     return df
 
 def latest(df, sensor):
