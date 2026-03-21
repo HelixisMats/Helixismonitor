@@ -73,7 +73,7 @@ def get_db():
 
 db = get_db()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def fetch_data(hours):
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     try:
@@ -86,7 +86,7 @@ def fetch_data(hours):
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def fetch_today():
     """Always fetch from midnight local (UTC) regardless of time window."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -257,8 +257,13 @@ if df.empty:
 
 v       = {s: latest(df, s) for s in df["sensor"].unique()}
 last_ts = df["created_at"].max().astimezone(timezone.utc)
-age_min = (datetime.now(timezone.utc) - df["created_at"].max()).total_seconds() / 60
+# Use most recent data from either source for freshness check
+latest_ts = df["created_at"].max()
+if not df_today.empty:
+    latest_ts = max(latest_ts, df_today["created_at"].max())
+age_min = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 60
 is_live = age_min < 5
+last_ts = latest_ts.astimezone(timezone.utc)
 pwr     = v.get("power"); irr = v.get("irradiance"); pres = v.get("pressure")
 
 # ── Header ────────────────────────────────────────────────────
