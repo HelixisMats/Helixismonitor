@@ -236,8 +236,12 @@ if df.empty:
 
 v = {s: latest(df, s) for s in df["sensor"].unique()}
 
-# DEBUG — remove after fixing
-st.info(f"DEBUG: df rows={len(df)}, last row={df['created_at'].max()}, today rows={len(df_today)}, power={v.get('power')}")
+# DEBUG
+now_utc = datetime.now(timezone.utc)
+now_swe = datetime.now(SWE)
+today_swe = now_swe.replace(hour=0, minute=0, second=0, microsecond=0)
+today_utc_check = today_swe.astimezone(timezone.utc)
+st.info(f"DEBUG: now_utc={now_utc.strftime('%H:%M:%S')}, now_swe={now_swe.strftime('%H:%M:%S')}, today_utc_start={today_utc_check.strftime('%Y-%m-%d %H:%M')}, df last={df['created_at'].max()}, df rows={len(df)}, today rows={len(df_today)}")
 
 latest_ts = df["created_at"].max()
 if not df_today.empty:
