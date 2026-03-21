@@ -76,7 +76,7 @@ def fetch_data(hours):
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=0)
 def fetch_today():
     now_swe = datetime.now(SWE)
     today_swe = now_swe.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -226,11 +226,8 @@ Max temp: 160°C · Max pressure: 6 bar
 </div>""", unsafe_allow_html=True)
 
 if auto_ref:
-    if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = time.time()
-    if time.time() - st.session_state.last_refresh > 60:
-        st.session_state.last_refresh = time.time()
-        st.cache_data.clear(); st.rerun()
+    # Simple reliable refresh — rerun every 60s via meta tag
+    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 # ── Load data ─────────────────────────────────────────────────
 df       = fetch_data(hours)
