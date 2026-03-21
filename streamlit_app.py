@@ -25,74 +25,33 @@ LBLUE = "#3A7BF5"
 
 st.markdown(f"""
 <style>
-  /* Remove Streamlit's default white header bar */
-  header[data-testid="stHeader"] {{
-    background: transparent !important;
-    height: 0 !important;
-  }}
-  #MainMenu, footer, header {{ visibility: hidden; }}
-
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  header[data-testid="stHeader"] {{ background:transparent!important; height:0!important; }}
+  #MainMenu, footer {{ visibility:hidden; }}
   html,body,[class*="css"] {{
-    font-family: 'Inter',-apple-system,sans-serif;
-    background: {BG};
-    color: {TEXT};
+    font-family:'Inter',-apple-system,sans-serif!important;
+    background:{BG}; color:{TEXT};
   }}
-  .block-container {{
-    padding-top: 1.2rem !important;
-    padding-bottom: 1rem;
-    background: {BG};
-  }}
-  .stApp {{ background: {BG}; }}
-  section[data-testid="stSidebar"] {{
-    background: {CARD};
-    border-right: 1px solid {BORDER};
-  }}
-
+  .block-container {{ padding-top:1.2rem!important; padding-bottom:1rem; background:{BG}; }}
+  .stApp {{ background:{BG}; }}
+  section[data-testid="stSidebar"] {{ background:{CARD}; border-right:1px solid {BORDER}; }}
   div[data-testid="metric-container"] {{
-    background: {CARD};
-    border: 1px solid {BORDER};
-    border-radius: 10px;
-    padding: 12px 16px;
+    background:{CARD}; border:1px solid {BORDER}; border-radius:10px; padding:12px 16px;
   }}
   div[data-testid="metric-container"] label {{
-    font-size: .7rem; color: {MUTED};
-    text-transform: uppercase; letter-spacing: .07em;
+    font-size:.7rem; color:{MUTED}; text-transform:uppercase; letter-spacing:.07em;
   }}
   div[data-testid="metric-container"] [data-testid="stMetricValue"] {{
-    color: {TEXT}; font-size: 1.2rem; font-weight: 600;
+    color:{TEXT}; font-size:1.2rem; font-weight:600;
   }}
-
   .section-title {{
-    font-size: .65rem; font-weight: 600; color: {MUTED};
-    text-transform: uppercase; letter-spacing: .1em;
-    margin: 16px 0 6px; border-left: 3px solid {BLUE}; padding-left: 8px;
+    font-size:.65rem; font-weight:600; color:{MUTED};
+    text-transform:uppercase; letter-spacing:.1em;
+    margin:16px 0 6px; border-left:3px solid {BLUE}; padding-left:8px;
   }}
-
-  /* Subtle status pill */
-  .status-pill {{
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 12px; border-radius: 20px;
-    font-size: .75rem; font-weight: 500; margin-bottom: 12px;
-  }}
-  .s-good {{ background: #E6F5F0; color: #0D6645; }}
-  .s-warn {{ background: #FDF5E0; color: #7A5200; }}
-  .s-idle {{ background: #ECEEF4; color: {MUTED}; }}
-  .s-alert {{ background: #FDECEA; color: #8B1A1A; }}
-  .dot {{ width:7px;height:7px;border-radius:50%;display:inline-block; }}
-
-  .helixis-logo {{
-    font-size: 1.5rem; font-weight: 800;
-    color: {TEXT}; letter-spacing: -.03em; line-height: 1;
-  }}
-  .helixis-logo span {{ color: {BLUE}; }}
-  .helixis-sub {{
-    font-size: .68rem; color: {MUTED};
-    text-transform: uppercase; letter-spacing: .1em; margin-top: 2px;
-  }}
-  .live-dot {{
-    display: inline-block; width: 7px; height: 7px;
-    border-radius: 50%; background: {GREEN}; margin-right: 5px;
-  }}
+  .helixis-logo {{ font-size:1.5rem; font-weight:800; color:{TEXT}; letter-spacing:-.03em; line-height:1; }}
+  .helixis-logo span {{ color:{BLUE}; }}
+  .helixis-sub {{ font-size:.68rem; color:{MUTED}; text-transform:uppercase; letter-spacing:.1em; margin-top:2px; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -115,6 +74,17 @@ def fetch_data(hours):
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df
 
+def today_energy(df):
+    """Calculate energy harvested today from heat_energy sensor delta."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    sub = df[(df['sensor'] == 'heat_energy') & (df['created_at'] >= today_start)].sort_values('created_at')
+    if len(sub) < 2:
+        return None
+    first = float(sub['value'].iloc[0])
+    last  = float(sub['value'].iloc[-1])
+    delta = last - first
+    return delta if delta >= 0 else None
+
 def latest(df, sensor):
     sub = df[df["sensor"] == sensor]
     return float(sub["value"].iloc[-1]) if not sub.empty else None
@@ -123,51 +93,55 @@ def fmt(val, decimals=1, unit=""):
     if val is None: return "—"
     return f"{val:.{decimals}f} {unit}".strip()
 
-# ── Thermometer (vertical bar) ────────────────────────────────
+# ── Vertical thermometer ──────────────────────────────────────
 def thermo(label, val, mn, mx, color):
     display = val if val is not None else mn
-    pct = max(0.0, min(1.0, (display - mn) / (mx - mn)))
+    fill = max(0.5, display - mn)
+    mid = round((mn + mx) / 2)
 
     fig = go.Figure()
-    # Track
+    # Background track
     fig.add_trace(go.Bar(
         x=[0], y=[mx - mn], base=mn,
-        marker_color="#DCE0EC", width=0.6,
+        marker_color="#DCE0EC", width=0.55,
         showlegend=False, hoverinfo="skip"
     ))
-    # Fill
-    fill_h = max(0.5, display - mn)
+    # Value fill
     fig.add_trace(go.Bar(
-        x=[0], y=[fill_h], base=mn,
-        marker_color=color, width=0.6,
+        x=[0], y=[fill], base=mn,
+        marker_color=color, width=0.55,
         showlegend=False,
-        hovertemplate=f"<b>{display:.1f}°C</b><extra>{label}</extra>"
+        hovertemplate=f"<b>{display:.1f}°C</b><extra></extra>"
     ))
+    # Always-visible value label — positioned at top of fill
+    label_y = min(display + (mx - mn) * 0.12, mx - (mx - mn) * 0.08)
     fig.add_annotation(
-        x=0, y=mn + (mx - mn) * 0.06,
+        x=0, y=label_y,
         text=f"<b>{display:.1f}°C</b>",
         font=dict(size=13, color=color, family="Inter"),
-        showarrow=False
+        showarrow=False, xanchor="center", yanchor="bottom"
     )
     fig.update_layout(
-        height=185, barmode="overlay",
-        margin=dict(l=28, r=8, t=26, b=4),
-        title=dict(text=label, font=dict(size=10, color=MUTED), x=0.5),
+        height=190, barmode="overlay",
+        margin=dict(l=32, r=8, t=6, b=4),
+        title=dict(text=f"<b>{label}</b>",
+                   font=dict(size=11, color=TEXT, family="Inter"),
+                   x=0.5, xanchor="center"),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(
-            range=[mn, mx],
-            gridcolor=BORDER, color=MUTED,
-            tickfont=dict(size=8),
-            tickvals=[mn, round((mn + mx) / 2), mx],
+            range=[mn, mx], gridcolor=BORDER, color=MUTED,
+            tickfont=dict(size=8, family="Inter"),
+            tickvals=[mn, mid, mx],
+            ticktext=[f"{mn}°", f"{mid}°", f"{mx}°"],
         ),
-        xaxis=dict(showticklabels=False, showgrid=False),
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
         showlegend=False,
     )
     return fig
 
 # ── Semicircle gauge ──────────────────────────────────────────
-def semi(label, val, mn, mx, unit, color, sub="", warn=None):
+def semi(label, val, mn, mx, unit, color, sub="", warn=None, ref_line=None):
     steps = [{"range": [mn, warn if warn else mx], "color": "#E8ECF8"}]
     if warn:
         steps.append({"range": [warn, mx], "color": "#FFF0CC"})
@@ -180,21 +154,30 @@ def semi(label, val, mn, mx, unit, color, sub="", warn=None):
         number={"suffix": f" {unit}", "font": {"size": 22, "color": color, "family": "Inter"}},
         gauge={
             "axis": {"range": [mn, mx],
-                     "tickfont": {"size": 9, "color": MUTED},
+                     "tickfont": {"size": 9, "color": MUTED, "family": "Inter"},
                      "tickcolor": BORDER},
-            "bar": {"color": color, "thickness": 0.28},
+            "bar": {"color": color, "thickness": 0.3},
             "bgcolor": "#E8ECF8",
             "borderwidth": 0,
             "steps": steps,
             **({"threshold": threshold} if threshold else {}),
         },
         title={
-            "text": f"<b>{label}</b><br><span style='font-size:10px;color:{MUTED}'>{sub}</span>",
+            "text": f"<b>{label}</b><br><span style='font-size:10px;color:{MUTED};font-family:Inter'>{sub}</span>",
             "font": {"size": 12, "color": TEXT, "family": "Inter"},
         },
     ))
+
+    # Optional reference line (e.g. 1000 W/m² standard)
+    if ref_line is not None:
+        fig.add_annotation(
+            x=0.5, y=0.15, xref="paper", yref="paper",
+            text=f"<span style='font-size:9px;color:{MUTED}'>▲ {ref_line} standard</span>",
+            showarrow=False, font=dict(size=9, color=MUTED),
+        )
+
     fig.update_layout(
-        height=210, margin=dict(l=20, r=20, t=60, b=8),
+        height=220, margin=dict(l=20, r=20, t=65, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
     )
     return fig
@@ -220,10 +203,10 @@ def linechart(df, sensors, colors, ylabel, height=270):
         height=height, margin=dict(l=0, r=0, t=10, b=0),
         yaxis_title=ylabel,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    font=dict(size=10, color=MUTED)),
+                    font=dict(size=10, color=MUTED, family="Inter")),
         hovermode="x unified",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=MUTED),
+        font=dict(color=MUTED, family="Inter"),
     )
     fig.update_xaxes(showgrid=False, color=MUTED)
     fig.update_yaxes(gridcolor=BORDER, color=MUTED)
@@ -231,7 +214,7 @@ def linechart(df, sensors, colors, ylabel, height=270):
 
 # ── Sidebar ───────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(f"<div style='color:{TEXT};font-weight:700;margin-bottom:12px'>Settings</div>",
+    st.markdown(f"<div style='font-family:Inter;color:{TEXT};font-weight:700;margin-bottom:12px'>Settings</div>",
                 unsafe_allow_html=True)
     hours = st.selectbox("Time window",
         options=[1, 6, 12, 24, 48, 168], index=3,
@@ -241,7 +224,7 @@ with st.sidebar:
         st.cache_data.clear(); st.rerun()
     st.divider()
     st.markdown(f"""
-<div style='font-size:.75rem;color:{MUTED};line-height:1.9'>
+<div style='font-family:Inter;font-size:.75rem;color:{MUTED};line-height:1.9'>
 <b style='color:{TEXT}'>Helixis LC12 HW</b><br>
 Linear Concentrator — CSP<br>
 Aperture: 12.35 m² · 380 kg<br>
@@ -269,6 +252,10 @@ v = {s: latest(df, s) for s in df["sensor"].unique()}
 last_ts = df["created_at"].max().astimezone(timezone.utc)
 pwr = v.get("power"); irr = v.get("irradiance"); pres = v.get("pressure")
 
+# Is data fresh? (within last 5 minutes)
+age_minutes = (datetime.now(timezone.utc) - df["created_at"].max()).total_seconds() / 60
+data_live = age_minutes < 5
+
 # ── Header ────────────────────────────────────────────────────
 h1, h2, h3 = st.columns([4, 3, 1])
 with h1:
@@ -277,10 +264,11 @@ with h1:
         f'<div class="helixis-sub">LC Linear Concentrator — Live Monitor</div>',
         unsafe_allow_html=True)
 with h2:
+    dot_color = GREEN if data_live else RED
     st.markdown(f"""
-<div style='padding-top:8px;font-size:.8rem;color:{MUTED}'>
-<span class="live-dot"></span>
-Last update: <b style='color:{TEXT}'>{last_ts.strftime('%H:%M:%S UTC')}</b>
+<div style='padding-top:8px;font-size:.8rem;color:{MUTED};font-family:Inter'>
+<span style='display:inline-block;width:8px;height:8px;border-radius:50%;background:{dot_color};margin-right:6px;'></span>
+{last_ts.strftime('%H:%M:%S UTC')}
 </div>""", unsafe_allow_html=True)
 with h3:
     if "view" not in st.session_state:
@@ -288,15 +276,7 @@ with h3:
     if st.button("⇄ View"):
         st.session_state.view = "numeric" if st.session_state.view == "gauges" else "gauges"
 
-# Status pill — subtle
-if pres and pres >= 5:
-    st.markdown(f'<div class="status-pill s-alert"><span class="dot" style="background:#C93333"></span>High pressure: {pres:.2f} bar — max 6 bar</div>', unsafe_allow_html=True)
-elif pwr and irr and irr > 200 and pwr > 1.0:
-    st.markdown(f'<div class="status-pill s-good"><span class="dot" style="background:{GREEN}"></span>Actively harvesting — concentrator tracking sun</div>', unsafe_allow_html=True)
-elif irr and irr > 50:
-    st.markdown(f'<div class="status-pill s-warn"><span class="dot" style="background:{AMBER}"></span>Low irradiance — limited collection</div>', unsafe_allow_html=True)
-else:
-    st.markdown(f'<div class="status-pill s-idle"><span class="dot" style="background:{MUTED}"></span>Idle — insufficient direct sunlight</div>', unsafe_allow_html=True)
+st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 if st.session_state.view == "gauges":
@@ -321,14 +301,14 @@ if st.session_state.view == "gauges":
                         use_container_width=True, config={"displayModeBar": False})
     with f2:
         st.plotly_chart(semi("Thermal power", v.get("power"), 0, 9.2, "kW", RED,
-                             "Peak 9.2 kW @ 1000 W/m²"),
+                             "9.2 kW @ 1000 W/m²"),
                         use_container_width=True, config={"displayModeBar": False})
     with f3:
         irr_color = AMBER if (irr and irr > 700) else (LBLUE if (irr and irr > 200) else MUTED)
-        irr_sub = "Excellent" if (irr and irr > 700) else ("Good" if (irr and irr > 200) else "Low")
-        st.plotly_chart(semi("Solar irradiance", irr, 0, 1000, "W/m²", irr_color,
-                             f"{irr_sub} — design peak 1000 W/m²"),
-                        use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(
+            semi("Solar irradiance", irr, 0, 1350, "W/m²", irr_color,
+                 "Max ~1350 W/m² (TOA)", ref_line="1000 W/m²"),
+            use_container_width=True, config={"displayModeBar": False})
     with f4:
         pcolor = RED if (pres and pres >= 5) else LBLUE
         psub = "⚠ High — max 6 bar" if (pres and pres >= 5) else "Normal — max 6 bar"
@@ -337,9 +317,9 @@ if st.session_state.view == "gauges":
 
     st.markdown('<div class="section-title">Energy</div>', unsafe_allow_html=True)
     k1, k2, k3 = st.columns(3)
-    ef = v.get("Energifaktor")
-    k1.metric("Heat Energy",       fmt(v.get("heat_energy"), 3, "kWh"), help="Accumulated since last reset")
-    k2.metric("Energy Counter",    fmt(ef / 1000 if ef else None, 2, "kWh"), help="Cumulative Wh → kWh")
+    energy_today = today_energy(df)
+    k1.metric("Energy today", fmt(energy_today, 3, "kWh"), help="Heat energy harvested since midnight UTC")
+    k2.metric("Heat energy (total)", fmt(v.get("heat_energy"), 3, "kWh"), help="Accumulated since last meter reset")
     k3.metric("ΔT Forward−Return", fmt(v.get("temp_difference"), 2, "°C"), help="Energy per litre of flow")
 
     st.divider()
@@ -361,8 +341,8 @@ if st.session_state.view == "gauges":
         st.caption("Strong correlation = efficient dual-axis tracking")
         fig_d = go.Figure()
         for s, color, yax, name in [
-            ("irradiance", AMBER, "y", "Irradiance (W/m²)"),
-            ("power", RED, "y2", "Power (kW)"),
+            ("irradiance", AMBER, "y",  "Irradiance (W/m²)"),
+            ("power",      RED,   "y2", "Power (kW)"),
         ]:
             sub = df[df["sensor"] == s]
             if not sub.empty:
@@ -373,8 +353,9 @@ if st.session_state.view == "gauges":
             yaxis2=dict(title="kW", color=RED, overlaying="y", side="right"),
             hovermode="x unified",
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=MUTED)),
-            font=dict(color=MUTED))
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(color=MUTED, family="Inter")),
+            font=dict(color=MUTED, family="Inter"))
         fig_d.update_xaxes(showgrid=False, color=MUTED)
         fig_d.update_yaxes(gridcolor=BORDER, color=MUTED)
         st.plotly_chart(fig_d, use_container_width=True)
@@ -387,7 +368,7 @@ if st.session_state.view == "gauges":
 else:
     st.markdown('<div class="section-title">Solar Concentrator & Environment</div>', unsafe_allow_html=True)
     c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Solar Irradiance", fmt(v.get("irradiance"), 0, "W/m²"), help="Peak design: 1000 W/m²")
+    c1.metric("Solar Irradiance", fmt(v.get("irradiance"), 0, "W/m²"), help="TOA ~1350 W/m², ground ~1000 W/m²")
     c2.metric("Solar Cell Temp",  fmt(v.get("temp_cell"), 1, "°C"))
     c3.metric("Wind Speed",       fmt(v.get("wind"), 2, "m/s"))
     pv = v.get("pressure")
@@ -409,11 +390,11 @@ else:
     c3.metric("ΔT Forward−Return", fmt(v.get("temp_difference"), 2, "°C"))
     c4.metric("Volume",            fmt(v.get("volume"), 1, "L"))
 
-    st.markdown('<div class="section-title">Accumulated Energy</div>', unsafe_allow_html=True)
-    c1,c2 = st.columns(2)
-    c1.metric("Heat Energy",    fmt(v.get("heat_energy"), 3, "kWh"))
-    ef = v.get("Energifaktor")
-    c2.metric("Energy Counter", fmt(ef / 1000 if ef else None, 2, "kWh"))
+    st.markdown('<div class="section-title">Energy</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    energy_today = today_energy(df)
+    c1.metric("Energy today", fmt(energy_today, 3, "kWh"), help="Heat energy harvested since midnight UTC")
+    c2.metric("Heat energy (total)", fmt(v.get("heat_energy"), 3, "kWh"), help="Accumulated since last meter reset")
 
     with st.expander("📥 Raw data & export"):
         pivot = df.pivot_table(index="created_at", columns="sensor", values="value", aggfunc="last") \
