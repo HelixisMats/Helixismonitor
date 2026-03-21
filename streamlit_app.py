@@ -236,6 +236,9 @@ if df.empty:
 
 v = {s: latest(df, s) for s in df["sensor"].unique()}
 
+# DEBUG — remove after fixing
+st.info(f"DEBUG: df rows={len(df)}, last row={df['created_at'].max()}, today rows={len(df_today)}, power={v.get('power')}")
+
 latest_ts = df["created_at"].max()
 if not df_today.empty:
     latest_ts = max(latest_ts, df_today["created_at"].max())
