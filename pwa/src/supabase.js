@@ -1,27 +1,48 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY
-
-export const supabase = createClient(url, key)
+export const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+)
 
 export async function fetchLatestReadings() {
-  // Get the latest value per sensor from the last 10 minutes
   const since = new Date(Date.now() - 10 * 60 * 1000).toISOString()
   const { data, error } = await supabase
     .from('sensor_readings')
-    .select('sensor, value, created_at')
+    .select('sensor,value,created_at')
     .gte('created_at', since)
     .order('created_at', { ascending: false })
-
   if (error || !data) return {}
-
-  // Keep only the most recent value per sensor
   const latest = {}
   for (const row of data) {
-    if (!(row.sensor in latest)) {
+    if (!(row.sensor in latest))
       latest[row.sensor] = { value: row.value, ts: row.created_at }
-    }
   }
   return latest
+}
+
+export async function fetchTodayPower() {
+  // Stockholm midnight in UTC (UTC+1 winter, UTC+2 summer)
+  const now = new Date()
+  const offsetMin = -now.getTimezoneOffset() || 60  // fallback UTC+1
+  const midnight = new Date(now)
+  midnight.setHours(0, 0, 0, 0)
+  midnight.setMinutes(midnight.getMinutes() - offsetMin)
+
+  const all = []
+  let offset = 0
+  while (true) {
+    const { data } = await supabase
+      .from('sensor_readings')
+      .select('value,created_at')
+      .eq('sensor', 'power')
+      .gte('created_at', midnight.toISOString())
+      .order('created_at', { ascending: true })
+      .range(offset, offset + 999)
+    if (!data?.length) break
+    all.push(...data)
+    if (data.length < 1000) break
+    offset += 1000
+  }
+  return all
 }
