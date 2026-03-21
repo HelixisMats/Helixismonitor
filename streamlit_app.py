@@ -63,7 +63,6 @@ def get_db():
 
 db = get_db()
 
-@st.cache_data(ttl=30)
 def fetch_data(hours):
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     try:
@@ -76,7 +75,6 @@ def fetch_data(hours):
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df
 
-@st.cache_data(ttl=0)
 def fetch_today():
     now_swe = datetime.now(SWE)
     today_swe = now_swe.replace(hour=0, minute=0, second=0, microsecond=0)
