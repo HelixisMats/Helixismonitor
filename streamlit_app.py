@@ -51,20 +51,33 @@ def get_db():
 
 db = get_db()
 
-def fetch_latest(limit=5000):
-    """Always fetch the most recent rows first."""
+def fetch_latest(hours_back=168):
+    """Fetch all rows for the last `hours_back` hours using pagination."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
+    all_rows = []
+    page_size = 1000
+    offset = 0
     try:
-        res = db.table("sensor_readings") \
-            .select("created_at,sensor,value") \
-            .order("created_at", desc=True) \
-            .limit(limit) \
-            .execute()
+        while True:
+            res = db.table("sensor_readings") \
+                .select("created_at,sensor,value") \
+                .gte("created_at", since) \
+                .order("created_at", desc=False) \
+                .range(offset, offset + page_size - 1) \
+                .execute()
+            batch = res.data
+            if not batch:
+                break
+            all_rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
     except Exception as exc:
         st.error(f"Database error: {exc}")
         return pd.DataFrame()
-    if not res.data:
+    if not all_rows:
         return pd.DataFrame()
-    df = pd.DataFrame(res.data)
+    df = pd.DataFrame(all_rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df = df.sort_values("created_at")
     return df
@@ -218,7 +231,7 @@ if auto_ref:
     st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 # ── Load data ─────────────────────────────────────────────────
-df_all   = fetch_latest(5000)
+df_all   = fetch_latest(hours_back=max(hours, 24))
 df       = filter_hours(df_all, hours)
 df_today = filter_today(df_all)
 
