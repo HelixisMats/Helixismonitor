@@ -86,6 +86,27 @@ def fetch_history(hours_back: int) -> pd.DataFrame:
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df.sort_values("created_at")
 
+@st.cache_data(ttl=60)
+def fetch_today_power() -> pd.DataFrame:
+    """Fetch all power readings from midnight today — used for energy integration."""
+    now_swe   = datetime.now(SWE)
+    today_utc = now_swe.replace(hour=0, minute=0, second=0, microsecond=0)                        .astimezone(timezone.utc)
+    rows, psize, offset = [], 1000, 0
+    try:
+        while True:
+            res = db.table("sensor_readings")                 .select("created_at,sensor,value")                 .eq("sensor", "power")                 .gte("created_at", today_utc.isoformat())                 .order("created_at", desc=False)                 .range(offset, offset + psize - 1).execute()
+            batch = res.data
+            if not batch: break
+            rows.extend(batch)
+            if len(batch) < psize: break
+            offset += psize
+    except Exception:
+        return pd.DataFrame()
+    if not rows: return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    return df.sort_values("created_at")
+
 # ── SMHI fetcher + Supabase storage ──────────────────────────
 @st.cache_data(ttl=600)
 def fetch_smhi_and_store() -> tuple[dict, dict]:
@@ -166,10 +187,8 @@ def fmt(val, decimals=1, unit=""):
     return f"{val:.{decimals}f} {unit}".strip() if val is not None else "—"
 
 def integrate_power(df) -> float | None:
-    now_swe   = datetime.now(SWE)
-    today_utc = now_swe.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc)
-    sub = df[df["sensor"]=="power"].copy()
-    sub = sub[sub["created_at"]>=today_utc].sort_values("created_at")
+    """Trapezoid integration of power → kWh. Pass a pre-filtered DataFrame."""
+    sub = df[df["sensor"] == "power"].sort_values("created_at") if "sensor" in df.columns else df.sort_values("created_at")
     if len(sub) < 2: return None
     times = sub["created_at"].astype("int64").values / 1e9 / 3600
     power = sub["value"].values.astype(float)
@@ -180,7 +199,7 @@ def integrate_power(df) -> float | None:
     except Exception:
         total = 0.0
         for i in range(1, len(times)):
-            total += (power[i]+power[i-1])/2*(times[i]-times[i-1])
+            total += (power[i] + power[i-1]) / 2 * (times[i] - times[i-1])
         return max(0.0, total)
 
 def linechart(df, sensors, colors, ylabel, height=300, extra_traces=None):
@@ -308,7 +327,8 @@ with tab_live:
             f'{"· LIVE" if is_live else f"· {age_min:.0f} min sedan"}</span>',
             unsafe_allow_html=True)
 
-        energy_today = integrate_power(df)
+        df_today_pwr  = fetch_today_power()
+        energy_today  = integrate_power(df_today_pwr)
 
         if view_mode == "🎯 Gauges":
             # ── Temperatures (semi gauges) ──
