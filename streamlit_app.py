@@ -205,15 +205,11 @@ def fetch_today_power() -> pd.DataFrame:
     return df.sort_values("created_at")
 
 @st.cache_data(ttl=1800)
-def fetch_strang(days_back: int = 1) -> pd.DataFrame:
-    """
-    Fetch DNI + GHI from SMHI STRÅNG model for Örkelljunga coordinates.
-    STRÅNG is a gridded radiation model — no station needed, uses lat/lon directly.
-    Parameters: 116=GHI, 118=DNI, 120=diffuse
-    """
+def fetch_strang(days_back: int = 1):
+    """Fetch DNI+GHI from SMHI STRÅNG. Returns (DataFrame, errors_dict)."""
     from_dt = (datetime.now(SWE) - timedelta(days=days_back)).strftime("%Y%m%d")
     to_dt   = datetime.now(SWE).strftime("%Y%m%d")
-    rows = []
+    rows, errors = [], {}
     for par, name in [("116", "ghi_strang"), ("118", "dni_strang")]:
         url = (f"https://strang.smhi.se/extraction/getparticular.php"
                f"?par={par}&from={from_dt}&to={to_dt}"
@@ -221,22 +217,30 @@ def fetch_strang(days_back: int = 1) -> pd.DataFrame:
         try:
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
+                errors[name] = f"HTTP {r.status_code}"
                 continue
-            for line in r.text.strip().splitlines():
+            text = r.text.strip()
+            if not text:
+                errors[name] = "Empty response"
+                continue
+            parsed = 0
+            for line in text.splitlines():
                 parts = line.split(";")
-                if len(parts) < 2:
-                    continue
+                if len(parts) < 2: continue
                 try:
-                    ts  = pd.to_datetime(parts[0].strip(), utc=True)
-                    val = float(parts[1].strip())
-                    rows.append({"created_at": ts, "sensor": name, "value": val})
+                    rows.append({"created_at": pd.to_datetime(parts[0].strip(), utc=True),
+                                 "sensor": name, "value": float(parts[1].strip())})
+                    parsed += 1
                 except Exception:
                     continue
-        except Exception:
-            continue
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values("created_at")
+            if parsed == 0:
+                errors[name] = f"No parseable rows. First line: {text.splitlines()[0][:100]}"
+        except requests.exceptions.ConnectionError as e:
+            errors[name] = f"Connection error: {e}"
+        except Exception as e:
+            errors[name] = str(e)
+    df = pd.DataFrame(rows).sort_values("created_at") if rows else pd.DataFrame()
+    return df, errors
 
 # ── SMHI fetcher + Supabase storage ──────────────────────────
 @st.cache_data(ttl=600)
@@ -760,122 +764,6 @@ with tab_hist:
                    fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
                    help=T["heat_help"])
 
-        # ── Energikonvergensanalys ────────────────────────────
-        st.markdown('<div class="section-title">Energy meter analysis — kWh or MWh?</div>',
-                    unsafe_allow_html=True)
-
-        sub_pwr = df_hist[df_hist["sensor"] == "power"].sort_values("created_at")
-        sub_egy = df_hist[df_hist["sensor"] == "heat_energy"].sort_values("created_at")
-
-        if len(sub_pwr) >= 2 and len(sub_egy) >= 2:
-            # Trapezoid integral from start of window
-            t0 = sub_pwr["created_at"].iloc[0]
-            times = sub_pwr["created_at"].astype("int64").values / 1e9 / 3600
-            power = sub_pwr["value"].values.astype(float)
-            try:
-                import numpy as np
-                fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
-                # Cumulative trapezoid
-                cum_kwh = []
-                for i in range(1, len(times)+1):
-                    cum_kwh.append(float(max(0, fn(power[:i], times[:i]) - fn(power[:1], times[:1]))))
-                cum_kwh[0] = 0.0
-            except Exception:
-                cum_kwh = []
-                acc = 0.0
-                for i in range(1, len(times)):
-                    acc += (power[i]+power[i-1])/2*(times[i]-times[i-1])
-                    cum_kwh.append(max(0, acc))
-                cum_kwh.insert(0, 0.0)
-
-            # Energy sensor delta from start
-            e0 = float(sub_egy["value"].iloc[0])
-            sub_egy_norm = sub_egy.copy()
-            sub_egy_norm["delta"] = sub_egy_norm["value"] - e0
-
-            # Best-fit scale factor: what multiplier makes energy sensor match integral?
-            egy_end   = float(sub_egy["value"].iloc[-1]) - e0
-            trap_end  = cum_kwh[-1] if cum_kwh else None
-
-            if trap_end and trap_end > 0.01 and egy_end > 0:
-                scale = trap_end / egy_end
-                if scale > 800:
-                    unit_guess = "MWh (factor ~1000)"
-                    unit_color = RUST
-                elif scale > 80:
-                    unit_guess = "Possibly MWh or wrong calibration"
-                    unit_color = AMBER
-                elif 0.8 < scale < 1.2:
-                    unit_guess = "kWh ✓ — matches well"
-                    unit_color = TEAL
-                else:
-                    unit_guess = f"Unknown (scale factor: {scale:.1f}×)"
-                    unit_color = MUTED
-
-                # Summary metrics
-                mc1, mc2, mc3, mc4 = st.columns(4)
-                mc1.metric("Trapezoid integral", f"{trap_end:.3f} kWh",
-                           help="Sum of power×time from power sensor since start of window")
-                mc2.metric("Energy sensor delta", f"{egy_end:.4f} units",
-                           help="Change in heat_energy sensor over same period")
-                mc3.metric("Scale factor", f"{scale:.1f}×",
-                           help="How many times larger the integral is vs the sensor delta")
-                mc4.metric("Likely unit", unit_guess)
-
-                st.markdown(
-                    f"<div style='padding:10px 14px;background:{BG2};border-radius:8px;"
-                    f"border-left:3px solid {unit_color};margin:8px 0'>"
-                    f"<b style='color:{unit_color}'>Conclusion:</b> "
-                    f"<span style='color:{TEXT}'>Scale factor {scale:.0f}× suggests the energy sensor "
-                    f"is most likely in <b>{'MWh' if scale > 200 else 'kWh' if 0.8 < scale < 1.2 else f'unknown units (×{scale:.1f})' }</b>. "
-                    f"{'To display correctly, multiply sensor value by 1000.' if scale > 200 else ''}"
-                    f"</span></div>",
-                    unsafe_allow_html=True
-                )
-
-            # Convergence chart
-            fig_conv = go.Figure()
-            if cum_kwh:
-                fig_conv.add_trace(go.Scatter(
-                    x=sub_pwr["created_at"], y=cum_kwh,
-                    name="Cumulative energy (trapezoid, kWh)",
-                    mode="lines", line=dict(color=TEAL, width=2.5)))
-
-            if not sub_egy_norm.empty and egy_end > 0 and trap_end and trap_end > 0.01:
-                # Plot sensor scaled to kWh
-                scale_factor = trap_end / egy_end
-                fig_conv.add_trace(go.Scatter(
-                    x=sub_egy_norm["created_at"],
-                    y=sub_egy_norm["delta"] * scale_factor,
-                    name=f"Energy sensor ×{scale_factor:.0f} (scaled to kWh)",
-                    mode="lines", line=dict(color=RUST, width=1.5, dash="dot")))
-                # Also raw sensor on right axis
-                fig_conv.add_trace(go.Scatter(
-                    x=sub_egy_norm["created_at"], y=sub_egy_norm["delta"],
-                    name="Energy sensor (raw delta)",
-                    mode="lines", line=dict(color=MUTED, width=1, dash="dash"),
-                    yaxis="y2"))
-
-            fig_conv.update_layout(
-                height=320, margin=dict(l=0, r=50, t=10, b=0),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            font=dict(size=10, color=MUTED, family="Inter")),
-                yaxis=dict(title=dict(text="kWh", font=dict(color=TEAL)),
-                           tickfont=dict(color=TEAL), gridcolor=BORDER),
-                yaxis2=dict(title=dict(text="sensor raw", font=dict(color=MUTED)),
-                            tickfont=dict(color=MUTED), overlaying="y", side="right",
-                            showgrid=False),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"))
-            fig_conv.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_conv, use_container_width=True)
-            st.caption("If scaled sensor (dotted red) tracks trapezoid integral (teal) well → "
-                       "scale factor is correct and unit can be determined. "
-                       "Perfect overlap = calibration confirmed.")
-        else:
-            st.info("Not enough power or energy data in selected window for convergence analysis.")
-
         with st.expander(f"📥 {T['raw_export']}"):
             piv2 = df_hist.pivot_table(
                 index="created_at", columns="sensor",
@@ -945,12 +833,23 @@ pumpstörningar.
     with col_r:
         with st.spinner(T["loading_strang"]):
             days_back = max(1, h_cmp // 24 + 1)
-            df_strang = fetch_strang(days_back)
+            df_strang, strang_errors = fetch_strang(days_back)
 
     if smhi_errors:
         with st.expander(f"⚠️ {len(smhi_errors)} SMHI-stationskälla(or) saknas"):
             for key, msg in smhi_errors.items():
                 st.warning(f"**{key}**: {msg}")
+
+    if strang_errors:
+        with st.expander(f"⚠️ STRÅNG model: {len(strang_errors)} parameter(s) failed", expanded=True):
+            for k, msg in strang_errors.items():
+                st.warning(f"**{k}**: {msg}")
+            st.caption(f"URL format: strang.smhi.se/extraction/getparticular.php"
+                       f"?par=118&from=YYYYMMDD&to=YYYYMMDD&lat={SITE_LAT}&lon={SITE_LON}&file=csv")
+    elif not df_strang.empty:
+        sensors_loaded = df_strang["sensor"].unique().tolist()
+        last_ts = df_strang["created_at"].max().astimezone(SWE).strftime("%H:%M")
+        st.success(f"✓ STRÅNG: {len(df_strang)} rows · {', '.join(sensors_loaded)} · latest: {last_ts}")
 
     # ── Väder just nu ─────────────────────────────────────────
     st.markdown('<div class="section-title">Weather conditions (SMHI stations)</div>',
