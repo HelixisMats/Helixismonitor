@@ -21,6 +21,39 @@ TEAL   = "#167A5E"; AMBER = "#B87200"; RUST = "#A83030"; SLATE = "#2E5EA0"
 LGRAY  = "#E4E7F0"
 SITE_LAT, SITE_LON = 56.248, 13.192
 
+LANG = {
+    "en": {
+        "live":"Live","history":"History","smhi":"SMHI","about":"About",
+        "energy":"Energy","energy_today":"Energy today","heat_total":"Heat energy (total)",
+        "delta_t":"ΔT Fwd−Ret",
+        "collector_r":"Collector R","collector_l":"Collector L",
+        "forward":"Forward","return":"Return","tank":"Tank",
+        "flow":"Flow","power":"Thermal power","irradiance":"Solar irradiance",
+        "pressure":"System pressure","wind":"Wind speed",
+        "recv_r":"Receiver tube right","recv_l":"Receiver tube left",
+        "max_power":"Max 9.2 kW @ 1000 W/m²","op_range":"Operating range 0–6 bar",
+        "near_max":"⚠ Near max 6 bar","htf":"Heat-transfer fluid",
+        "temperatures":"Temperatures","flow_env":"Flow, Power & Environment",
+        "clear":"Clear sunshine","sunny":"Sunny","partly":"Partly cloudy",
+        "cloudy":"Cloudy","overcast":"Overcast","night":"Night / no sun",
+    },
+    "sv": {
+        "live":"Live","history":"Historik","smhi":"SMHI","about":"Om",
+        "energy":"Energi","energy_today":"Energi idag","heat_total":"Värmeenergi (total)",
+        "delta_t":"ΔT Fwd−Ret",
+        "collector_r":"Collector R","collector_l":"Collector L",
+        "forward":"Framledning","return":"Retur","tank":"Tank",
+        "flow":"Flöde","power":"Termisk effekt","irradiance":"Solinstrålning",
+        "pressure":"Systemtryck","wind":"Vindhastighet",
+        "recv_r":"Mottagarrör höger","recv_l":"Mottagarrör vänster",
+        "max_power":"Max 9.2 kW @ 1000 W/m²","op_range":"Driftområde 0–6 bar",
+        "near_max":"⚠ Nära max 6 bar","htf":"Värmevätskeflöde",
+        "temperatures":"Temperaturer","flow_env":"Flöde, Effekt & Miljö",
+        "clear":"Klarsolsken","sunny":"Soligt","partly":"Halvklart",
+        "cloudy":"Molnigt","overcast":"Mulet","night":"Natt / ingen sol",
+    },
+}
+
 # SMHI stations closest to Örkelljunga
 # Ängelholm 63600: temp(1), wind(4), cloudcover(16)
 # Lund 53430: global radiation(11)
@@ -329,7 +362,14 @@ st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:6px 0 
             unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────
-tab_live, tab_hist, tab_smhi, tab_om = st.tabs(["🔴 Live", "📈 Historik", "🌤 SMHI", "ℹ️ Om"])
+lang = st.sidebar.radio("Language / Språk", ["English", "Svenska"],
+                        horizontal=True, label_visibility="collapsed")
+lang = "en" if lang == "English" else "sv"
+T = LANG[lang]
+
+tab_live, tab_hist, tab_smhi, tab_om = st.tabs([
+    f"🔴 {T['live']}", f"📈 {T['history']}", f"🌤 {T['smhi']}", f"ℹ️ {T['about']}"
+])
 
 # ════════════════════════════════════════════════════════════════
 # LIVE TAB
@@ -411,21 +451,14 @@ with tab_live:
                 st.plotly_chart(gauge_semi("Systemtryck",pres,0,6,"bar",pcolor,
                     psub,warn=5),use_container_width=True,config={"displayModeBar":False})
 
-            # ── Energy ──
-            st.markdown('<div class="section-title">Energi</div>', unsafe_allow_html=True)
-            e1,e2,e3 = st.columns(3)
-            e1.metric("Energi idag", fmt(energy_today,3,"kWh"),
-                      help=("Beräknad med **trapetsintegration** av effektmätaren.\n\n"
-                            "**Metod:** Varje mätpunkt ger ett litet trapetsobjekt:\n"
-                            "`ΔE = (P₁ + P₂) / 2 × Δt`\n\n"
-                            "där `P` = effekt i kW och `Δt` = tid i timmar. "
-                            "Summan av alla trapetser ger kWh från midnatt. "
-                            "Mer exakt än att använda energisensorn direkt "
-                            "eftersom den kan ha nollpunktsfel eller kalibreringsproblem."))
-            e2.metric("Värmeenergi (total)", fmt(v.get("heat_energy"),3,"kWh"),
-                      help="Ackumulerat värde direkt från energisensorn sedan senaste nollställning.")
-            e3.metric("ΔT Fwd−Ret", fmt(v.get("temp_difference"),2,"°C"),
-                      help="Temperaturdifferens mellan framledning och retur.")
+            # ── Energy (HTML tiles) ──
+            st.markdown(f'<div class="section-title">{T["energy"]}</div>',
+                        unsafe_allow_html=True)
+            render_tiles([
+                (T["energy_today"], energy_today,             "kWh", 0, 30,   TEAL, 3, None),
+                (T["heat_total"],   v.get("heat_energy"),     "kWh", 0, 9999, BLUE, 3, None),
+                (T["delta_t"],      v.get("temp_difference"), "°C",  0, 50,   BLUE, 2, None),
+            ])
 
         else:
             # ── Compact tile view ──
