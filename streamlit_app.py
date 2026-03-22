@@ -317,6 +317,10 @@ def latest_val(df, sensor):
 def fmt(val, decimals=1, unit=""):
     return f"{val:.{decimals}f} {unit}".strip() if val is not None else "—"
 
+def mwh_to_kwh(val):
+    """Convert heat_energy sensor (MWh) to kWh for display."""
+    return val * 1000 if val is not None else None
+
 def metric_tile(label, val, unit, mn, mx, color, decimals=1, warn=None):
     display = fmt(val, decimals, unit)
     pct = 0
@@ -555,7 +559,7 @@ with tab_live:
                         unsafe_allow_html=True)
             render_tiles([
                 (T["energy_today"], energy_today,             "kWh", 0, 30,   TEAL, 3, None),
-                (T["heat_total"],   v.get("heat_energy"),     "kWh", 0, 9999, BLUE, 3, None),
+                (T["heat_total"],   mwh_to_kwh(v.get("heat_energy")), "kWh", 0, 9999, BLUE, 3, None),
                 (T["delta_t"],      v.get("temp_difference"), "°C",  0, 50,   BLUE, 2, None),
             ])
 
@@ -599,7 +603,7 @@ with tab_live:
             st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
             e1,e2 = st.columns(2)
             e1.metric(T["energy_today_trap"], fmt(energy_today,3,"kWh"))
-            e2.metric(T["heat_sensor_total"], fmt(v.get("heat_energy"),3,"kWh"))
+            e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
 
     live_dashboard()
 
@@ -753,7 +757,7 @@ with tab_hist:
             fmt(ep_window, 3, "kWh"),
             help="Energy in the selected history window only (not necessarily from midnight).")
         ec2.metric(T["heat_sensor_total"],
-                   fmt(latest_val(df_hist,"heat_energy"), 3, "kWh"),
+                   fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
                    help=T["heat_help"])
 
         # ── Energikonvergensanalys ────────────────────────────
