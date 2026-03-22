@@ -420,7 +420,8 @@ def gauge_semi(label, val, mn, mx, unit, color, sub_text="", warn=None):
             **({"threshold":threshold} if threshold else {}),
         },
         title={"text":(f"<span style='font-weight:600;font-size:12px;color:{TEXT}'>{label}</span>"
-                       + (f"<br><span style='font-size:10px;color:{MUTED}'>{sub_text}</span>" if sub_text else "")),
+                       f"<br><span style='font-size:10px;color:{MUTED if sub_text else "rgba(0,0,0,0)"}'>"
+                       f"{sub_text if sub_text else "&nbsp;"}</span>"),
                "font":{"size":12,"family":"Inter"}},
     ))
     fig.update_layout(height=200,margin=dict(l=20,r=20,t=70,b=8),
