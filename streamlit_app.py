@@ -61,7 +61,7 @@ SMHI = {
     "temperature": ("1",  "63600"),
     "wind_speed":  ("4",  "63600"),
     "irradiance":  ("11", "53430"),
-    "cloud_cover": ("16", "63600"),
+    "humidity":    ("6",  "63600"),   # Relative humidity
 }
 
 st.markdown(f"""<style>
@@ -173,8 +173,8 @@ def fetch_smhi_and_store() -> tuple[dict, dict]:
     SMHI_PARAMS = {
         "temperature": ("1",  "62040"),   # Helsingborg lufttemperatur
         "wind_speed":  ("4",  "62040"),   # Helsingborg vindhastighet
-        "irradiance":  ("11", "98210"),   # Hoburg globalstrålning (closest active)
-        "cloud_cover": ("16", "62040"),   # Helsingborg molnighet
+        "irradiance":  ("11", "53430"),   # Lund A — globalstrålning
+        "humidity":    ("6",  "62040"),   # Helsingborg luftfuktighet
     }
     result, errors = {}, {}
     for key, (param, station) in SMHI_PARAMS.items():
@@ -242,6 +242,32 @@ def latest_val(df, sensor):
 
 def fmt(val, decimals=1, unit=""):
     return f"{val:.{decimals}f} {unit}".strip() if val is not None else "—"
+
+def metric_tile(label, val, unit, mn, mx, color, decimals=1, warn=None):
+    display = fmt(val, decimals, unit)
+    pct = 0
+    if val is not None and mx > mn:
+        pct = max(0, min(100, round((val - mn) / (mx - mn) * 100)))
+    warn_html = (f"<span style='color:{RUST};font-size:.7rem;margin-left:6px'>⚠</span>"
+                 if warn and val is not None and val >= warn else "")
+    return f"""
+<div style='background:{BG2};border-radius:8px;padding:12px 14px;height:100%'>
+  <div style='font-size:.68rem;font-weight:600;color:{TEXT};text-transform:uppercase;
+              letter-spacing:.08em;margin-bottom:4px'>{label}</div>
+  <div style='font-size:1.25rem;font-weight:700;color:{color};line-height:1.1'>
+    {display}{warn_html}
+  </div>
+  <div style='height:3px;border-radius:2px;background:{BORDER};margin-top:8px'>
+    <div style='height:100%;width:{pct}%;border-radius:2px;background:{color};
+                transition:width .4s'></div>
+  </div>
+</div>"""
+
+def render_tiles(specs):
+    cols = st.columns(len(specs))
+    for col, (label, val, unit, mn, mx, color, dec, warn) in zip(cols, specs):
+        col.markdown(metric_tile(label, val, unit, mn, mx, color, dec, warn),
+                     unsafe_allow_html=True)
 
 def sky_condition(irr):
     """Map irradiance W/m² → label, icon, color."""
@@ -688,7 +714,7 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
         "temperature": ("Lufttemperatur","°C",-20,40,SLATE,1),
         "wind_speed":  ("Vindhastighet","m/s",0,25,SLATE,1),
         "irradiance":  ("Globalstrålning (Lund)","W/m²",0,1350,AMBER,0),
-        "cloud_cover": ("Molnighet","okta",0,8,MUTED,0),
+        "humidity":    ("Humidity (SMHI)","%",0,100,SLATE,0),
     }
     smhi_latest = {}
     tile_specs = []
@@ -763,7 +789,7 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
     st.plotly_chart(fig_irr,use_container_width=True)
 
     # Power vs cloud cover
-    st.markdown('<div class="section-title">Termisk effekt vs molnighet</div>',
+    st.markdown('<div class="section-title">Thermal power vs humidity (SMHI)</div>',
                 unsafe_allow_html=True)
     fig_cl = go.Figure()
     if not df_cmp.empty:
@@ -772,21 +798,21 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
             fig_cl.add_trace(go.Scatter(x=sub_p["created_at"],y=sub_p["value"],
                 name="Effekt (kW)",mode="lines",line=dict(color=RUST,width=2),yaxis="y"))
     if not df_smhi_hist.empty:
-        sub_cl = df_smhi_hist[df_smhi_hist["sensor"]=="smhi_cloud_cover"]
+        sub_cl = df_smhi_hist[df_smhi_hist["sensor"]=="smhi_humidity"]
         if not sub_cl.empty:
             fig_cl.add_trace(go.Scatter(x=sub_cl["created_at"],y=sub_cl["value"],
-                name="Molnighet okta (SMHI)",mode="lines+markers",
+                name="Humidity % (SMHI)",mode="lines",
                 line=dict(color="#A0A8C8",width=1.5,dash="dot"),marker=dict(size=4),yaxis="y2"))
-    smhi_cl = smhi_data.get("cloud_cover")
+    smhi_cl = smhi_data.get("humidity")
     if smhi_cl is not None:
         w = smhi_cl[smhi_cl["created_at"]>=since_dt]
         if not w.empty:
             fig_cl.add_trace(go.Scatter(x=w["created_at"],y=w["value"],
-                name="Molnighet (live SMHI)",mode="lines+markers",
+                name="Humidity % (SMHI live)",mode="lines",
                 line=dict(color="#8090B8",width=1.5),marker=dict(size=4),yaxis="y2"))
     fig_cl.update_layout(height=260,margin=dict(l=0,r=0,t=10,b=0),
         yaxis=dict(title="kW",color=RUST,gridcolor=BORDER),
-        yaxis2=dict(title="okta (0–8)",color=SLATE,overlaying="y",side="right",range=[0,8]),
+        yaxis2=dict(title=dict(text="%",font=dict(color=SLATE)),tickfont=dict(color=SLATE),overlaying="y",side="right",range=[0,100]),
         hovermode="x unified",
         legend=dict(orientation="h",yanchor="bottom",y=1.02,font=dict(size=10,color=MUTED,family="Inter")),
         paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",font=dict(color=MUTED,family="Inter"))
@@ -816,7 +842,7 @@ CREATE INDEX IF NOT EXISTS idx_smhi_ts     ON smhi_readings(created_at DESC);
 - `smhi_temperature` — lufttemperatur (Ängelholm)
 - `smhi_wind_speed` — vindhastighet (Ängelholm)
 - `smhi_irradiance` — globalstrålning W/m² (Lund)
-- `smhi_cloud_cover` — molnighet okta 0–8 (Ängelholm)
+- `smhi_humidity` — relativ luftfuktighet % (Helsingborg)
 """)
 
 # ── Om systemet tab ──────────────────────────────────────────
