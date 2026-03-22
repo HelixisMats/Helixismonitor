@@ -43,6 +43,19 @@ LANG = {
         "irr_excellent":"Excellent","irr_moderate":"Moderate","irr_low":"Low / night",
         "section_flow":"Flow, Power & Environment","display_mode":"Display mode",
         "no_data":"No data received.",
+        "section_solar":"Solar, Power & Weather",
+        "section_temps_pressure":"Temperatures & System pressure",
+        "section_dt_flow":"ΔT & Flow","section_summary":"Summary for period",
+        "section_energy":"Energy","energy_today_trap":"Energy today (trapezoid)",
+        "heat_sensor_total":"Heat energy sensor (total)",
+        "pressure_lbl":"Pressure (bar)","flow_lbl":"Flow (m³/h)",
+        "power_lbl":"Thermal power (kW)","irr_lbl":"Irradiance (W/m²)","wind_lbl":"Wind (m/s)",
+        "trap_help":"Calculated via trapezoid integration. ΔE=(P₁+P₂)/2×Δt — more accurate than sensor.",
+        "heat_help":"Accumulated from energy sensor since last reset.",
+        "loading_hist":"Loading history…","no_data_interval":"No data for selected interval.",
+        "raw_export":"Raw data & export","download_csv":"Download CSV",
+        "analysis_period":"Analysis period",
+        "loading_smhi":"Loading SMHI station data…","loading_strang":"Loading STRÅNG model data…",
     },
     "sv": {
         "live":"Live","history":"Historik","smhi":"SMHI","about":"Om",
@@ -65,6 +78,19 @@ LANG = {
         "irr_excellent":"Utmärkt","irr_moderate":"Måttlig","irr_low":"Låg / natt",
         "section_flow":"Flöde, Effekt & Miljö","display_mode":"Visningsläge",
         "no_data":"Ingen data mottagen.",
+        "section_solar":T["section_solar"],
+        "section_temps_pressure":T["section_temps_pressure"],
+        "section_dt_flow":T["section_dt_flow"],"section_summary":T["section_summary"],
+        "section_energy":"Energi","energy_today_trap":"Energi idag (trapets)",
+        "heat_sensor_total":T["heat_sensor_total"],
+        "pressure_lbl":"Tryck (bar)","flow_lbl":"Flöde (m³/h)",
+        "power_lbl":"Termisk effekt (kW)","irr_lbl":"Instrålning (W/m²)","wind_lbl":"Vind (m/s)",
+        "trap_help":"Beräknad med trapetsintegration. ΔE=(P₁+P₂)/2×Δt — mer exakt än sensorn.",
+        "heat_help":"Ackumulerat värde från energisensorn sedan senaste nollställning.",
+        "loading_hist":"Hämtar historik…","no_data_interval":"Ingen data för valt intervall.",
+        "raw_export":"Rådata & export","download_csv":"Ladda ner CSV",
+        "analysis_period":"Analysperiod",
+        "loading_smhi":"Hämtar SMHI stationsdata…","loading_strang":"Hämtar STRÅNG modelldata…",
     },
 }
 
@@ -317,15 +343,14 @@ def render_tiles(specs):
         col.markdown(metric_tile(label, val, unit, mn, mx, color, dec, warn),
                      unsafe_allow_html=True)
 
-def sky_condition(irr):
-    """Map irradiance W/m² → label, icon, color."""
-    if irr is None:          return "—",              "❓", MUTED
-    if irr >= 850:           return "Klarsolsken",    "☀️",  AMBER
-    if irr >= 600:           return "Soligt",         "🌤",  AMBER
-    if irr >= 350:           return "Halvklart",      "⛅",  SLATE
-    if irr >= 100:           return "Molnigt",        "🌥",  MUTED
-    if irr >= 20:            return "Mulet",          "☁️",  MUTED
-    return                          "Natt / ingen sol","🌙", MUTED
+def sky_condition(irr, T):
+    if irr is None:    return "—",           "❓", MUTED
+    if irr >= 850:     return T["clear"],    "☀️",  AMBER
+    if irr >= 600:     return T["sunny"],    "🌤",  AMBER
+    if irr >= 350:     return T["partly"],   "⛅",  SLATE
+    if irr >= 100:     return T["cloudy"],   "🌥",  MUTED
+    if irr >= 20:      return T["overcast"], "☁️",  MUTED
+    return                    T["night"],    "🌙",  MUTED
 
 def integrate_power(df) -> float | None:
     """Trapezoid integration of power → kWh. Pass a pre-filtered DataFrame."""
@@ -478,7 +503,7 @@ with tab_live:
         df_today_pwr  = fetch_today_power()
         energy_today  = integrate_power(df_today_pwr)
 
-        sky_label, sky_icon, sky_color = sky_condition(irr)
+        sky_label, sky_icon, sky_color = sky_condition(irr, T)
         st.markdown(
             f"<div style='display:flex;align-items:center;gap:10px;margin:6px 0 10px'>"
             f"<span style='font-size:1.8rem;line-height:1'>{sky_icon}</span>"
@@ -559,22 +584,22 @@ with tab_live:
                 ("Tank","temp_tank",TEAL,10,100)]):
                 col.markdown(tile(lbl,v.get(s),"°C",mn,mx,col_,1),unsafe_allow_html=True)
 
-            st.markdown('<div class="section-title">Flöde, Effekt & Miljö</div>',
+            st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             cols2 = st.columns(6)
             for col,(lbl,s,u,mn,mx,col_,dec,warn) in zip(cols2,[
-                ("Flöde","flow","m³/h",0,1,SLATE,3,None),
-                ("Effekt","power","kW",0,9.2,RUST,2,None),
-                ("Instrålning","irradiance","W/m²",0,1350,irr_color,0,None),
-                ("Tryck","pressure","bar",0,6,pcolor,2,5.0),
-                ("Vind","wind","m/s",0,20,SLATE,2,None),
+                (T["flow"],"flow","m³/h",0,1,SLATE,3,None),
+                (T["power"],"power","kW",0,9.2,RUST,2,None),
+                (T["irradiance"],"irradiance","W/m²",0,1350,irr_color,0,None),
+                (T["pressure"],"pressure","bar",0,6,pcolor,2,5.0),
+                (T["wind"],"wind","m/s",0,20,SLATE,2,None),
                 ("ΔT","temp_difference","°C",0,50,BLUE,2,None)]):
                 col.markdown(tile(lbl,v.get(s),u,mn,mx,col_,dec,warn),unsafe_allow_html=True)
 
-            st.markdown('<div class="section-title">Energi</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
             e1,e2 = st.columns(2)
-            e1.metric("Energi idag (trapets)", fmt(energy_today,3,"kWh"))
-            e2.metric("Värmeenergi (total)", fmt(v.get("heat_energy"),3,"kWh"))
+            e1.metric(T["energy_today_trap"], fmt(energy_today,3,"kWh"))
+            e2.metric(T["heat_sensor_total"], fmt(v.get("heat_energy"),3,"kWh"))
 
     live_dashboard()
 
@@ -588,11 +613,11 @@ with tab_hist:
         format_func=lambda h: f"{h}h" if h < 24 else
             (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"))
 
-    with st.spinner("Hämtar historik…"):
+    with st.spinner(T["loading_hist"]):
         df_hist = fetch_history(hours)
 
     if df_hist.empty:
-        st.warning("Ingen data för valt intervall.")
+        st.warning(T["no_data_interval"])
     else:
         cmap = {
             "temp_right_coll": RUST,  "temp_left_coll": AMBER,
@@ -609,9 +634,9 @@ with tab_hist:
         # Vänster axel: instrålning W/m²
         # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
         for sensor, color, name, yaxis, dash in [
-            ("irradiance", AMBER, "Instrålning (W/m²)",  "y",  "solid"),
-            ("power",      RUST,  "Termisk effekt (kW)", "y2", "solid"),
-            ("wind",       SLATE, "Vind (m/s)",          "y2", "dot"),
+            ("irradiance", AMBER, T["irr_lbl"],  "y",  "solid"),
+            ("power",      RUST,  T["power_lbl"], "y2", "solid"),
+            ("wind",       SLATE, T["wind_lbl"],         "y2", "dot"),
         ]:
             sub = df_hist[df_hist["sensor"] == sensor]
             if not sub.empty:
@@ -653,7 +678,7 @@ with tab_hist:
         sub_p = df_hist[df_hist["sensor"] == "pressure"]
         if not sub_p.empty:
             fig_temp.add_trace(go.Scatter(x=sub_p["created_at"], y=sub_p["value"],
-                name="Tryck (bar)", mode="lines",
+                name=T["pressure_lbl"], mode="lines",
                 line=dict(width=1.5, color=SLATE, dash="dot"), yaxis="y2"))
         fig_temp.update_layout(
             height=320, margin=dict(l=0, r=50, t=10, b=0),
@@ -677,7 +702,7 @@ with tab_hist:
         fig_dt = go.Figure()
         for sensor, color, name, yaxis in [
             ("temp_difference", TEXT,  "ΔT (°C)",    "y"),
-            ("flow",            SLATE, "Flöde (m³/h)", "y2"),
+            ("flow",            SLATE, T["flow_lbl"], "y2"),
         ]:
             sub = df_hist[df_hist["sensor"] == sensor]
             if not sub.empty:
@@ -716,18 +741,20 @@ with tab_hist:
         st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
                      use_container_width=True, hide_index=True)
 
-        ep = integrate_power(df_hist)
-        if ep is not None:
-            st.markdown('<div class="section-title">Energi</div>', unsafe_allow_html=True)
-            ec1, ec2 = st.columns(2)
-            ec1.metric("Energi idag (trapets-integration)", f"{ep:.3f} kWh",
-                help=("**Trapetsintegration av effektmätaren:**\n\n"
-                      "ΔE = (P₁ + P₂) / 2 × Δt (timmar)\n\n"
-                      "Summerar alla mätpunkter från midnatt. "
-                      "Mer exakt än energisensorn direkt — opåverkad av "
-                      "nollpunktsfel eller kalibreringsproblem."))
-            ec2.metric("Värmeenergisensor (total)",
-                       fmt(latest_val(df_hist,"heat_energy"), 3, "kWh"))
+        # Energy today always uses full-day data — same source as Live tab
+        ep_today = integrate_power(fetch_today_power())
+        ep_window = integrate_power(df_hist)   # energy in selected window only
+
+        st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric(T["energy_today_trap"], fmt(ep_today, 3, "kWh"),
+            help=T["trap_help"])
+        ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
+            fmt(ep_window, 3, "kWh"),
+            help="Energy in the selected history window only (not necessarily from midnight).")
+        ec2.metric(T["heat_sensor_total"],
+                   fmt(latest_val(df_hist,"heat_energy"), 3, "kWh"),
+                   help=T["heat_help"])
 
         # ── Energikonvergensanalys ────────────────────────────
         st.markdown('<div class="section-title">Energy meter analysis — kWh or MWh?</div>',
@@ -845,13 +872,13 @@ with tab_hist:
         else:
             st.info("Not enough power or energy data in selected window for convergence analysis.")
 
-        with st.expander("📥 Rådata & export"):
+        with st.expander(f"📥 {T['raw_export']}"):
             piv2 = df_hist.pivot_table(
                 index="created_at", columns="sensor",
                 values="value", aggfunc="last"
             ).reset_index().sort_values("created_at", ascending=False)
             st.dataframe(piv2.head(500), use_container_width=True)
-            st.download_button("⬇️ CSV", df_hist.to_csv(index=False),
+            st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
                 f"helixis_{hours}h.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
@@ -902,17 +929,17 @@ pumpstörningar.
 """)
 
     # ── Hämta data ────────────────────────────────────────────
-    h_cmp = st.selectbox("Analysperiod", [6, 12, 24, 48, 168], index=2,
+    h_cmp = st.selectbox(T["analysis_period"], [6, 12, 24, 48, 168], index=2,
                           format_func=lambda h: f"{h}h" if h < 24 else
                               (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"),
                           key="smhi_h")
 
     col_l, col_r = st.columns(2)
     with col_l:
-        with st.spinner("Hämtar SMHI stationsdata…"):
+        with st.spinner(T["loading_smhi"]):
             smhi_data, smhi_errors = fetch_smhi_and_store()
     with col_r:
-        with st.spinner("Hämtar STRÅNG modelldata…"):
+        with st.spinner(T["loading_strang"]):
             days_back = max(1, h_cmp // 24 + 1)
             df_strang = fetch_strang(days_back)
 
