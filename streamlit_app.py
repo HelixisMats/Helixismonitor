@@ -36,6 +36,13 @@ LANG = {
         "temperatures":"Temperatures","flow_env":"Flow, Power & Environment",
         "clear":"Clear sunshine","sunny":"Sunny","partly":"Partly cloudy",
         "cloudy":"Cloudy","overcast":"Overcast","night":"Night / no sun",
+        "recv_r_sub":"Receiver tube right","recv_l_sub":"Receiver tube left",
+        "fwd_sub":"Forward pipe","ret_sub":"Return pipe","tank_sub":"Storage tank",
+        "htf_sub":"Heat-transfer fluid","max_power_sub":"Max 9.2 kW @ 1000 W/m²",
+        "op_range_sub":"Operating range 0–6 bar","near_max_sub":"⚠ Near max 6 bar",
+        "irr_excellent":"Excellent","irr_moderate":"Moderate","irr_low":"Low / night",
+        "section_flow":"Flow, Power & Environment","display_mode":"Display mode",
+        "no_data":"No data received.",
     },
     "sv": {
         "live":"Live","history":"Historik","smhi":"SMHI","about":"Om",
@@ -51,6 +58,13 @@ LANG = {
         "temperatures":"Temperaturer","flow_env":"Flöde, Effekt & Miljö",
         "clear":"Klarsolsken","sunny":"Soligt","partly":"Halvklart",
         "cloudy":"Molnigt","overcast":"Mulet","night":"Natt / ingen sol",
+        "recv_r_sub":"Mottagarrör höger","recv_l_sub":"Mottagarrör vänster",
+        "fwd_sub":"Framledning","ret_sub":"Retur","tank_sub":"Lagertank",
+        "htf_sub":"Värmevätskeflöde","max_power_sub":"Max 9.2 kW @ 1000 W/m²",
+        "op_range_sub":"Driftområde 0–6 bar","near_max_sub":"⚠ Nära max 6 bar",
+        "irr_excellent":"Utmärkt","irr_moderate":"Måttlig","irr_low":"Låg / natt",
+        "section_flow":"Flöde, Effekt & Miljö","display_mode":"Visningsläge",
+        "no_data":"Ingen data mottagen.",
     },
 }
 
@@ -163,6 +177,40 @@ def fetch_today_power() -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df.sort_values("created_at")
+
+@st.cache_data(ttl=1800)
+def fetch_strang(days_back: int = 1) -> pd.DataFrame:
+    """
+    Fetch DNI + GHI from SMHI STRÅNG model for Örkelljunga coordinates.
+    STRÅNG is a gridded radiation model — no station needed, uses lat/lon directly.
+    Parameters: 116=GHI, 118=DNI, 120=diffuse
+    """
+    from_dt = (datetime.now(SWE) - timedelta(days=days_back)).strftime("%Y%m%d")
+    to_dt   = datetime.now(SWE).strftime("%Y%m%d")
+    rows = []
+    for par, name in [("116", "ghi_strang"), ("118", "dni_strang")]:
+        url = (f"https://strang.smhi.se/extraction/getparticular.php"
+               f"?par={par}&from={from_dt}&to={to_dt}"
+               f"&lat={SITE_LAT}&lon={SITE_LON}&file=csv")
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                continue
+            for line in r.text.strip().splitlines():
+                parts = line.split(";")
+                if len(parts) < 2:
+                    continue
+                try:
+                    ts  = pd.to_datetime(parts[0].strip(), utc=True)
+                    val = float(parts[1].strip())
+                    rows.append({"created_at": ts, "sensor": name, "value": val})
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("created_at")
 
 # ── SMHI fetcher + Supabase storage ──────────────────────────
 @st.cache_data(ttl=600)
@@ -402,14 +450,14 @@ tab_live, tab_hist, tab_smhi, tab_om = st.tabs([
 # ════════════════════════════════════════════════════════════════
 with tab_live:
 
-    view_mode = st.radio("Visningsläge", ["🎯 Gauges", "📋 Kompakt"],
+    view_mode = st.radio(T["display_mode"], ["🎯 Gauges", "📋 Kompakt"],
                          horizontal=True, label_visibility="collapsed")
 
     @st.fragment(run_every=30)
     def live_dashboard():
         df = fetch_live()
         if df.empty:
-            st.warning("Ingen data."); return
+            st.warning(T["no_data"]); return
 
         v        = {s: latest_val(df,s) for s in df["sensor"].unique()}
         last_ts  = df["created_at"].max()
@@ -443,38 +491,38 @@ with tab_live:
 
         if view_mode == "🎯 Gauges":
             # ── Temperatures (semi gauges) ──
-            st.markdown('<div class="section-title">Temperaturer</div>',
+            st.markdown(f'<div class="section-title">{T["temperatures"]}</div>',
                         unsafe_allow_html=True)
             tc = st.columns(5)
-            for col, (lbl, sensor, color, mn, mx, sub_text) in zip(tc, [
-                ("Collector R", "temp_right_coll", RUST,  20, 160, "Mottagarrör höger"),
-                ("Collector L", "temp_left_coll",  AMBER, 20, 160, "Mottagarrör vänster"),
-                ("Forward",     "temp_forward",    RUST,  20, 120, "Framledning"),
-                ("Return",      "temp_return",     SLATE, 10, 100, "Retur"),
-                ("Tank",        "temp_tank",       TEAL,  10, 100, "Lagertank"),
+            for col, (lbl_key, sensor, color, mn, mx, sub_key) in zip(tc, [
+                ("collector_r", "temp_right_coll", RUST,  20, 160, "recv_r_sub"),
+                ("collector_l", "temp_left_coll",  AMBER, 20, 160, "recv_l_sub"),
+                ("forward",     "temp_forward",    RUST,  20, 120, "fwd_sub"),
+                ("return",      "temp_return",     SLATE, 10, 100, "ret_sub"),
+                ("tank",        "temp_tank",       TEAL,  10, 100, "tank_sub"),
             ]):
                 col.plotly_chart(
-                    gauge_semi(lbl, v.get(sensor), mn, mx, "°C", color, sub_text),
+                    gauge_semi(T[lbl_key], v.get(sensor), mn, mx, "°C", color, T[sub_key]),
                     use_container_width=True, config={"displayModeBar": False})
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
-            st.markdown('<div class="section-title">Flöde, Effekt & Miljö</div>',
+            st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             g1,g2,g3,g4 = st.columns(4)
             with g1:
-                st.plotly_chart(gauge_semi("Flöde",v.get("flow"),0,1,"m³/h",SLATE,
-                    "Värmevätskeflöde"),use_container_width=True,config={"displayModeBar":False})
+                st.plotly_chart(gauge_semi(T["flow"],v.get("flow"),0,1,"m³/h",SLATE,
+                    T["htf_sub"]),use_container_width=True,config={"displayModeBar":False})
             with g2:
-                st.plotly_chart(gauge_semi("Termisk effekt",v.get("power"),0,9.2,"kW",RUST,
-                    "Max 9.2 kW @ 1000 W/m²"),use_container_width=True,config={"displayModeBar":False})
+                st.plotly_chart(gauge_semi(T["power"],v.get("power"),0,9.2,"kW",RUST,
+                    T["max_power_sub"]),use_container_width=True,config={"displayModeBar":False})
             with g3:
-                irr_sub = ("Utmärkt" if (irr and irr>700) else
-                           "Måttlig" if (irr and irr>200) else "Låg / natt")
-                st.plotly_chart(gauge_semi("Solinstrålning",irr,0,1350,"W/m²",irr_color,
+                irr_sub = (T["irr_excellent"] if (irr and irr>700) else
+                           T["irr_moderate"]  if (irr and irr>200) else T["irr_low"])
+                st.plotly_chart(gauge_semi(T["irradiance"],irr,0,1350,"W/m²",irr_color,
                     f"{irr_sub} · max ~1350 W/m²"),use_container_width=True,config={"displayModeBar":False})
             with g4:
-                psub = "⚠ Nära max 6 bar" if (pres and pres>=5) else "Driftområde 0–6 bar"
-                st.plotly_chart(gauge_semi("Systemtryck",pres,0,6,"bar",pcolor,
+                psub = T["near_max_sub"] if (pres and pres>=5) else T["op_range_sub"]
+                st.plotly_chart(gauge_semi(T["pressure"],pres,0,6,"bar",pcolor,
                     psub,warn=5),use_container_width=True,config={"displayModeBar":False})
 
             # ── Energy (HTML tiles) ──
@@ -501,7 +549,7 @@ with tab_live:
     <div style='height:100%;width:{pct}%;background:{color};border-radius:2px'></div>
   </div></div>"""
 
-            st.markdown('<div class="section-title">Temperaturer</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="section-title">{T["temperatures"]}</div>', unsafe_allow_html=True)
             cols = st.columns(5)
             for col,(lbl,s,col_,mn,mx) in zip(cols,[
                 ("Collector R","temp_right_coll",RUST,20,160),
@@ -694,156 +742,246 @@ with tab_hist:
 # SMHI & ANALYS TAB
 # ════════════════════════════════════════════════════════════════
 with tab_smhi:
-    st.markdown(f"""<div style='font-size:.8rem;color:{MUTED};margin-bottom:12px'>
-SMHI öppen data (CC BY) · <b>Helsingborg</b> (station 62040) — temp, vind, fukt ·
-<b>Växjö</b> (station 64565) — globalstrålning · Plats: Eket, Örkelljunga 56.248°N 13.192°E
-</div>""",unsafe_allow_html=True)
 
-    with st.spinner("Hämtar SMHI-data och lagrar…"):
-        smhi_data, smhi_errors = fetch_smhi_and_store()
+    # ── Förklaringstext ───────────────────────────────────────
+    with st.expander("ℹ️ Vad gör vi med denna data?", expanded=False):
+        st.markdown(f"""
+### Från GHI till DNI — varför det spelar roll för Helixis
+
+Helixis LC12 är en **linjär solfångare (CSP)** som fokuserar direkt solljus via speglar mot
+ett mottagarrör. Till skillnad från plana solpaneler (som också nyttjar diffust ljus)
+kräver koncentrerade system nästan uteslutande **DNI — Direct Normal Irradiance**,
+dvs solstrålning som kommer *direkt* från solen längs en rak linje.
+
+**Problemet:** DNI-mätare (pyrheliometrar) kostar 30 000–100 000 kr och kräver daglig skötsel.
+Vi har istället en GHI-sensor (global horisontell instrålning) som mäter allt ljus ovanifrån.
+
+**Lösningen — clearness index (kt):**
+
+SMHI:s modellsystem **STRÅNG** beräknar både GHI och DNI för exakt vår koordinat
+(56.248°N, 13.192°E) med en fysikalisk atmosfärmodell. Genom att jämföra:
+
+> `kt = DNI_STRÅNG / GHI_STRÅNG`
+
+får vi ett dimensionslöst tal 0–1 som beskriver hur "klar" himlen är.
+Under molnfria dagar är kt högt (0.7–0.9). Under molniga dagar sjunker kt mot 0.
+
+Vi kan sedan **estimera DNI på plats:**
+
+> `DNI_estimerat = kt × GHI_sensor`
+
+**Teoretisk maxeffekt:**
+
+Med känd DNI och systemparametrar kan vi beräkna vad Helixis *borde* producera:
+
+> `P_max = DNI × Apertur × η_optisk`
+> `P_max = DNI × 12.35 m² × 0.65 ≈ DNI × 8.0 W per W/m²`
+
+Skillnaden mellan `P_teoretisk` och `P_mätt` berättar om systemet jobbar optimalt —
+eller om det finns förluster i form av smuts, feljustering, termiska förluster eller
+pumpstörningar.
+
+---
+*Data: SMHI STRÅNG-modellen (fri, ingen nyckel) + Helsingborg station 62040 för väder.*
+""")
+
+    # ── Hämta data ────────────────────────────────────────────
+    h_cmp = st.selectbox("Analysperiod", [6, 12, 24, 48, 168], index=2,
+                          format_func=lambda h: f"{h}h" if h < 24 else
+                              (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"),
+                          key="smhi_h")
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        with st.spinner("Hämtar SMHI stationsdata…"):
+            smhi_data, smhi_errors = fetch_smhi_and_store()
+    with col_r:
+        with st.spinner("Hämtar STRÅNG modelldata…"):
+            days_back = max(1, h_cmp // 24 + 1)
+            df_strang = fetch_strang(days_back)
 
     if smhi_errors:
-        with st.expander(f"⚠️ {len(smhi_errors)} SMHI-källa(or) kunde inte hämtas"):
+        with st.expander(f"⚠️ {len(smhi_errors)} SMHI-stationskälla(or) saknas"):
             for key, msg in smhi_errors.items():
                 st.warning(f"**{key}**: {msg}")
-            st.caption("Stationer: Helsingborg 62040 (temp/vind/fukt) · "
-                       "Växjö 64565 (globalstrålning param 11) · ~40–80 km från Örkelljunga.")
 
-    # Current SMHI values
+    # ── Väder just nu ─────────────────────────────────────────
+    st.markdown('<div class="section-title">Weather conditions (SMHI stations)</div>',
+                unsafe_allow_html=True)
     smhi_defs = {
-        "temperature": ("Lufttemperatur","°C",-20,40,SLATE,1),
-        "wind_speed":  ("Vindhastighet","m/s",0,25,SLATE,1),
-        "irradiance":  ("Global radiation (Växjö)","W/m²",0,1350,AMBER,0),
-        "humidity":    ("Humidity (SMHI)","%",0,100,SLATE,0),
+        "temperature": ("Air temp",    "°C",  -20, 40,   SLATE, 1),
+        "wind_speed":  ("Wind speed",  "m/s",   0, 25,   SLATE, 1),
+        "irradiance":  ("GHI (Växjö)", "W/m²",  0, 1350, AMBER, 0),
+        "humidity":    ("Humidity",    "%",      0, 100,  SLATE, 0),
     }
-    smhi_latest = {}
     tile_specs = []
-    for key,(label,unit,mn,mx,color,dec) in smhi_defs.items():
+    for key, (label, unit, mn, mx, color, dec) in smhi_defs.items():
         df_s = smhi_data.get(key)
-        val = float(df_s["value"].iloc[-1]) if isinstance(df_s, pd.DataFrame) and not df_s.empty else None
-        smhi_latest[key] = val
-        tile_specs.append((label,val,unit,mn,mx,color,dec,None))
+        val  = float(df_s["value"].iloc[-1]) if isinstance(df_s, pd.DataFrame) and not df_s.empty else None
+        tile_specs.append((label, val, unit, mn, mx, color, dec, None))
+    render_tiles(tile_specs)
 
-    st.markdown('<div class="section-title">SMHI just nu</div>',unsafe_allow_html=True)
-    scols = st.columns(4)
-    def stile(label,val,unit,mn,mx,color,dec=1):
-        display = fmt(val,dec,unit)
-        pct = max(0,min(100,round((val-mn)/(mx-mn)*100))) if val is not None and mx>mn else 0
-        return f"""<div style='background:{BG2};border-radius:8px;padding:12px 14px'>
-<div style='font-size:.65rem;font-weight:500;color:{MUTED};text-transform:uppercase;
-  letter-spacing:.08em;margin-bottom:4px'>{label}</div>
-<div style='font-size:1.2rem;font-weight:600;color:{color}'>{display}</div>
-<div style='height:3px;border-radius:2px;background:{BORDER};margin-top:7px'>
-  <div style='height:100%;width:{pct}%;background:{color};border-radius:2px'></div>
-</div></div>"""
-    for col,(l,val,u,mn,mx,c,d,_) in zip(scols,tile_specs):
-        col.markdown(stile(l,val,u,mn,mx,c,d),unsafe_allow_html=True)
-
-    smhi_ts = None
-    for df_s in smhi_data.values():
-        if isinstance(df_s, pd.DataFrame) and not df_s.empty:
-            smhi_ts = df_s["created_at"].iloc[-1].astimezone(SWE)
-            break
-    if smhi_ts:
-        st.caption(f"Senast uppdaterat från SMHI: {smhi_ts.strftime('%H:%M')} · "
-                   f"Data fördröjd ~1h · Lagras i Supabase för historisk analys")
-
-    # Comparison chart
-    st.markdown('<div class="section-title">Solinstrålning — sensor vs SMHI Lund</div>',
+    # ── STRÅNG — DNI & kt-faktor ──────────────────────────────
+    st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
                 unsafe_allow_html=True)
-    h_cmp = st.selectbox("Jämförelseperiod",[6,12,24,48],index=1,
-                          format_func=lambda h:f"{h}h",key="smhi_h")
 
-    df_cmp  = fetch_history(h_cmp)
-    df_smhi_hist = fetch_smhi_history(h_cmp)
     since_dt = datetime.now(timezone.utc) - timedelta(hours=h_cmp)
+    df_cmp   = fetch_history(h_cmp)
 
-    fig_irr = go.Figure()
-    if not df_cmp.empty:
-        sub = df_cmp[df_cmp["sensor"]=="irradiance"]
-        if not sub.empty:
-            fig_irr.add_trace(go.Scatter(x=sub["created_at"],y=sub["value"],
-                name="Sensor (på plats)",mode="lines",line=dict(color=AMBER,width=2)))
+    # Filter STRÅNG to period
+    df_st = df_strang[df_strang["created_at"] >= since_dt] if not df_strang.empty else pd.DataFrame()
 
-    # From Supabase (historical SMHI)
-    if not df_smhi_hist.empty:
-        sub_si = df_smhi_hist[df_smhi_hist["sensor"]=="smhi_irradiance"]
-        if not sub_si.empty:
-            fig_irr.add_trace(go.Scatter(x=sub_si["created_at"],y=sub_si["value"],
-                name="SMHI Lund (lagrat)",mode="lines",line=dict(color=SLATE,width=1.5,dash="dot")))
-    # Also from live SMHI fetch
-    smhi_irr = smhi_data.get("irradiance")
-    if smhi_irr is not None:
-        w = smhi_irr[smhi_irr["created_at"]>=since_dt]
-        if not w.empty:
-            fig_irr.add_trace(go.Scatter(x=w["created_at"],y=w["value"],
-                name="SMHI Lund (live)",mode="lines",line=dict(color="#6080C0",width=1.5,dash="dash")))
+    # Compute kt and theoretical power
+    kt_current = None
+    dni_est_current = None
+    p_theoretical = None
 
-    fig_irr.update_layout(height=280,margin=dict(l=0,r=0,t=10,b=0),yaxis_title="W/m²",
-        hovermode="x unified",legend=dict(orientation="h",yanchor="bottom",y=1.02,
-            font=dict(size=10,color=MUTED,family="Inter")),
-        paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=MUTED,family="Inter"))
-    fig_irr.update_xaxes(showgrid=False,color=MUTED)
-    fig_irr.update_yaxes(gridcolor=BORDER,color=MUTED)
-    st.plotly_chart(fig_irr,use_container_width=True)
+    if not df_st.empty and not df_cmp.empty:
+        ghi_st  = df_st[df_st["sensor"] == "ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
+        dni_st  = df_st[df_st["sensor"] == "dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
+        merged  = pd.merge_asof(ghi_st.sort_values("created_at"),
+                                dni_st.sort_values("created_at"),
+                                on="created_at", tolerance=pd.Timedelta("30min"))
+        merged  = merged[merged["ghi_m"] > 50].dropna()  # filter night/zeros
+        if not merged.empty:
+            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, 1.2)
 
-    # Power vs cloud cover
-    st.markdown('<div class="section-title">Thermal power vs humidity (SMHI)</div>',
+            # Latest kt + DNI estimate from on-site GHI sensor
+            irr_live = df_cmp[df_cmp["sensor"] == "irradiance"].sort_values("created_at")
+            if not irr_live.empty and not merged.empty:
+                kt_current      = float(merged["kt"].iloc[-1])
+                ghi_sensor_last = float(irr_live["value"].iloc[-1])
+                dni_est_current = kt_current * ghi_sensor_last
+                # Theoretical power: DNI × aperture × optical efficiency
+                APERTURE   = 12.35   # m²
+                ETA_OPT    = 0.65    # optical efficiency (peak ~0.72, realistic 0.65)
+                p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000  # kW
+
+            # ── kt tiles ──────────────────────────────────────
+            kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
+            p_actual = float(df_cmp[df_cmp["sensor"]=="power"]["value"].iloc[-1])                        if not df_cmp[df_cmp["sensor"]=="power"].empty else None
+            efficiency_pct = (p_actual / p_theoretical * 100) if p_theoretical and p_theoretical > 0.1 and p_actual else None
+
+            render_tiles([
+                ("Clearness index kt",    kt_current,       "",    0, 1,    kt_color, 2, None),
+                ("DNI estimated",         dni_est_current,  "W/m²",0, 1000, AMBER,   0, None),
+                ("Theoretical max power", p_theoretical,    "kW",  0, 9.2,  RUST,    2, None),
+                ("Actual power",          p_actual,         "kW",  0, 9.2,  TEAL,    2, None),
+            ])
+
+            if efficiency_pct is not None:
+                eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
+                st.markdown(
+                    f"<div style='margin:12px 0 4px;font-size:.9rem;color:{TEXT}'>"
+                    f"System performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
+                    f"of theoretical maximum"
+                    f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
+                    f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+    # ── Graf: GHI sensor vs STRÅNG GHI + DNI ──────────────────
+    st.markdown('<div class="section-title">GHI sensor vs STRÅNG model (GHI & DNI)</div>',
                 unsafe_allow_html=True)
-    fig_cl = go.Figure()
+    fig_rad = go.Figure()
     if not df_cmp.empty:
-        sub_p = df_cmp[df_cmp["sensor"]=="power"]
-        if not sub_p.empty:
-            fig_cl.add_trace(go.Scatter(x=sub_p["created_at"],y=sub_p["value"],
-                name="Effekt (kW)",mode="lines",line=dict(color=RUST,width=2),yaxis="y"))
-    if not df_smhi_hist.empty:
-        sub_cl = df_smhi_hist[df_smhi_hist["sensor"]=="smhi_humidity"]
-        if not sub_cl.empty:
-            fig_cl.add_trace(go.Scatter(x=sub_cl["created_at"],y=sub_cl["value"],
-                name="Humidity % (SMHI)",mode="lines",
-                line=dict(color="#A0A8C8",width=1.5,dash="dot"),marker=dict(size=4),yaxis="y2"))
-    smhi_cl = smhi_data.get("humidity")
-    if smhi_cl is not None:
-        w = smhi_cl[smhi_cl["created_at"]>=since_dt]
-        if not w.empty:
-            fig_cl.add_trace(go.Scatter(x=w["created_at"],y=w["value"],
-                name="Humidity % (SMHI live)",mode="lines",
-                line=dict(color="#8090B8",width=1.5),marker=dict(size=4),yaxis="y2"))
-    fig_cl.update_layout(height=260,margin=dict(l=0,r=0,t=10,b=0),
-        yaxis=dict(title="kW",color=RUST,gridcolor=BORDER),
-        yaxis2=dict(title=dict(text="%",font=dict(color=SLATE)),tickfont=dict(color=SLATE),overlaying="y",side="right",range=[0,100]),
+        sub_ghi = df_cmp[df_cmp["sensor"] == "irradiance"]
+        if not sub_ghi.empty:
+            fig_rad.add_trace(go.Scatter(
+                x=sub_ghi["created_at"], y=sub_ghi["value"],
+                name="GHI sensor (on-site)", mode="lines",
+                line=dict(color=AMBER, width=2.5)))
+    if not df_st.empty:
+        sub_gm = df_st[df_st["sensor"] == "ghi_strang"]
+        sub_dm = df_st[df_st["sensor"] == "dni_strang"]
+        if not sub_gm.empty:
+            fig_rad.add_trace(go.Scatter(
+                x=sub_gm["created_at"], y=sub_gm["value"],
+                name="GHI STRÅNG model", mode="lines",
+                line=dict(color=SLATE, width=1.5, dash="dot")))
+        if not sub_dm.empty:
+            fig_rad.add_trace(go.Scatter(
+                x=sub_dm["created_at"], y=sub_dm["value"],
+                name="DNI STRÅNG model", mode="lines",
+                line=dict(color=RUST, width=1.5, dash="dash")))
+    fig_rad.update_layout(
+        height=300, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="W/m²",
         hovermode="x unified",
-        legend=dict(orientation="h",yanchor="bottom",y=1.02,font=dict(size=10,color=MUTED,family="Inter")),
-        paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",font=dict(color=MUTED,family="Inter"))
-    fig_cl.update_xaxes(showgrid=False,color=MUTED)
-    st.plotly_chart(fig_cl,use_container_width=True)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    font=dict(size=10, color=MUTED, family="Inter")),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=MUTED, family="Inter"))
+    fig_rad.update_xaxes(showgrid=False, color=MUTED)
+    fig_rad.update_yaxes(gridcolor=BORDER, color=MUTED)
+    st.plotly_chart(fig_rad, use_container_width=True)
 
-    with st.expander("ℹ️ Om SMHI-data och lagring"):
-        st.markdown(f"""
-Varje gång SMHI-fliken laddas hämtas senaste dygnet från SMHI och sparas i tabellen
-`smhi_readings` i Supabase. På så sätt byggs ett historiskt arkiv av väderdata
-som kan jämföras med sensordata över tid.
+    # ── Graf: Faktisk vs teoretisk effekt ─────────────────────
+    if not df_st.empty and not df_cmp.empty and not merged.empty:
+        st.markdown('<div class="section-title">Actual vs theoretical power output</div>',
+                    unsafe_allow_html=True)
 
-**Tabellstruktur (kör i Supabase SQL Editor om tabellen saknas):**
-```sql
-CREATE TABLE IF NOT EXISTS smhi_readings (
-  id         bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  created_at timestamptz NOT NULL,
-  sensor     text NOT NULL,
-  value      float8 NOT NULL,
-  UNIQUE(created_at, sensor)
-);
-CREATE INDEX IF NOT EXISTS idx_smhi_sensor ON smhi_readings(sensor);
-CREATE INDEX IF NOT EXISTS idx_smhi_ts     ON smhi_readings(created_at DESC);
-```
+        # Merge sensor power with STRÅNG kt to get theoretical per timestep
+        pwr_df = df_cmp[df_cmp["sensor"] == "power"][["created_at","value"]].rename(columns={"value":"power"})
+        irr_df = df_cmp[df_cmp["sensor"] == "irradiance"][["created_at","value"]].rename(columns={"value":"ghi_sensor"})
+        kt_df  = merged[["created_at","kt"]]
 
-**Sensorer som lagras:**
-- `smhi_temperature` — lufttemperatur (Ängelholm)
-- `smhi_wind_speed` — vindhastighet (Ängelholm)
-- `smhi_irradiance` — globalstrålning W/m² (Lund)
-- `smhi_humidity` — relativ luftfuktighet % (Helsingborg)
-""")
+        tmp = pd.merge_asof(pwr_df.sort_values("created_at"),
+                            kt_df.sort_values("created_at"),
+                            on="created_at", tolerance=pd.Timedelta("1h"))
+        tmp = pd.merge_asof(tmp.sort_values("created_at"),
+                            irr_df.sort_values("created_at"),
+                            on="created_at", tolerance=pd.Timedelta("10min"))
+        tmp = tmp.dropna()
+        if not tmp.empty:
+            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 * 0.65 / 1000).clip(0)
+
+            fig_pwr = go.Figure()
+            fig_pwr.add_trace(go.Scatter(
+                x=tmp["created_at"], y=tmp["p_theoretical"],
+                name="Theoretical max (kW)", mode="lines",
+                line=dict(color=SLATE, width=1.5, dash="dot"),
+                fill="tozeroy", fillcolor=f"rgba(46,94,160,0.08)"))
+            fig_pwr.add_trace(go.Scatter(
+                x=tmp["created_at"], y=tmp["power"],
+                name="Actual power (kW)", mode="lines",
+                line=dict(color=RUST, width=2.5),
+                fill="tozeroy", fillcolor=f"rgba(168,48,48,0.12)"))
+            fig_pwr.update_layout(
+                height=280, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="kW",
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            font=dict(size=10, color=MUTED, family="Inter")),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=MUTED, family="Inter"))
+            fig_pwr.update_xaxes(showgrid=False, color=MUTED)
+            fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
+            st.plotly_chart(fig_pwr, use_container_width=True)
+            st.caption("Gap between theoretical (dotted) and actual (red) = losses from optics, "
+                       "tracking, heat exchange, and system startup. Shaded area shows energy potential.")
+
+    # ── kt-tidsserie ──────────────────────────────────────────
+    if not df_st.empty and "kt" in locals() and not merged.empty:
+        st.markdown('<div class="section-title">Clearness index kt over time</div>',
+                    unsafe_allow_html=True)
+        fig_kt = go.Figure()
+        fig_kt.add_trace(go.Scatter(
+            x=merged["created_at"], y=merged["kt"],
+            name="kt (DNI/GHI)", mode="lines",
+            line=dict(color=TEAL, width=2),
+            fill="tozeroy", fillcolor="rgba(22,122,94,0.1)"))
+        fig_kt.add_hline(y=0.7, line_dash="dot", line_color=AMBER,
+                         annotation_text="Clear sky threshold (kt=0.7)")
+        fig_kt.update_layout(
+            height=220, margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="kt", range=[0, 1.1], gridcolor=BORDER, color=MUTED),
+            hovermode="x unified",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"))
+        fig_kt.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_kt, use_container_width=True)
+        st.caption("kt > 0.7 = clear sky, direct sunlight optimal for concentrating systems. "
+                   "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
 
 # ── Om systemet tab ──────────────────────────────────────────
 with tab_om:
