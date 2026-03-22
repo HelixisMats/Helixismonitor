@@ -56,11 +56,11 @@ LANG = {
 
 # SMHI stations closest to Örkelljunga
 # Ängelholm 63600: temp(1), wind(4), cloudcover(16)
-# Lund 53430: global radiation(11)
+# Malmö 52350: global radiation(11) — closest active station with param 11
 SMHI = {
     "temperature": ("1",  "63600"),
     "wind_speed":  ("4",  "63600"),
-    "irradiance":  ("11", "53430"),
+    "irradiance":  ("11", "64565"),   # Växjö Sol
     "humidity":    ("6",  "63600"),   # Relative humidity
 }
 
@@ -173,7 +173,7 @@ def fetch_smhi_and_store() -> tuple[dict, dict]:
     SMHI_PARAMS = {
         "temperature": ("1",  "62040"),   # Helsingborg lufttemperatur
         "wind_speed":  ("4",  "62040"),   # Helsingborg vindhastighet
-        "irradiance":  ("11", "53430"),   # Lund A — globalstrålning
+        "irradiance":  ("11", "64565"),   # Växjö Sol — globalstrålning (~60km)
         "humidity":    ("6",  "62040"),   # Helsingborg luftfuktighet
     }
     result, errors = {}, {}
@@ -695,8 +695,8 @@ with tab_hist:
 # ════════════════════════════════════════════════════════════════
 with tab_smhi:
     st.markdown(f"""<div style='font-size:.8rem;color:{MUTED};margin-bottom:12px'>
-SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, molnighet ·
-<b>Lund</b> (station 53430) — globalstrålning · Plats: Eket, Örkelljunga 56.248°N 13.192°E
+SMHI öppen data (CC BY) · <b>Helsingborg</b> (station 62040) — temp, vind, fukt ·
+<b>Växjö</b> (station 64565) — globalstrålning · Plats: Eket, Örkelljunga 56.248°N 13.192°E
 </div>""",unsafe_allow_html=True)
 
     with st.spinner("Hämtar SMHI-data och lagrar…"):
@@ -706,14 +706,14 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
         with st.expander(f"⚠️ {len(smhi_errors)} SMHI-källa(or) kunde inte hämtas"):
             for key, msg in smhi_errors.items():
                 st.warning(f"**{key}**: {msg}")
-            st.caption("Stationer: Helsingborg (62040) för temp/vind/moln, "
-                       "Hoburg (98210) för globalstrålning.")
+            st.caption("Stationer: Helsingborg 62040 (temp/vind/fukt) · "
+                       "Växjö 64565 (globalstrålning param 11) · ~40–80 km från Örkelljunga.")
 
     # Current SMHI values
     smhi_defs = {
         "temperature": ("Lufttemperatur","°C",-20,40,SLATE,1),
         "wind_speed":  ("Vindhastighet","m/s",0,25,SLATE,1),
-        "irradiance":  ("Globalstrålning (Lund)","W/m²",0,1350,AMBER,0),
+        "irradiance":  ("Global radiation (Växjö)","W/m²",0,1350,AMBER,0),
         "humidity":    ("Humidity (SMHI)","%",0,100,SLATE,0),
     }
     smhi_latest = {}
