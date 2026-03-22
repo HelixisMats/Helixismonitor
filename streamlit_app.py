@@ -294,19 +294,20 @@ with tab_live:
         energy_today = integrate_power(df)
 
         if view_mode == "🎯 Gauges":
-            # ── Temperatures (thermometers) ──
+            # ── Temperatures (semi gauges) ──
             st.markdown('<div class="section-title">Temperaturer</div>',
                         unsafe_allow_html=True)
             tc = st.columns(5)
-            for col, (lbl, sensor, color, mn, mx) in zip(tc, [
-                ("Collector R", "temp_right_coll", RUST,  20, 160),
-                ("Collector L", "temp_left_coll",  AMBER, 20, 160),
-                ("Forward",     "temp_forward",    RUST,  20, 120),
-                ("Return",      "temp_return",     SLATE, 10, 100),
-                ("Tank",        "temp_tank",       TEAL,  10, 100),
+            for col, (lbl, sensor, color, mn, mx, sub_text) in zip(tc, [
+                ("Collector R", "temp_right_coll", RUST,  20, 160, "Mottagarrör höger"),
+                ("Collector L", "temp_left_coll",  AMBER, 20, 160, "Mottagarrör vänster"),
+                ("Forward",     "temp_forward",    RUST,  20, 120, "Framledning"),
+                ("Return",      "temp_return",     SLATE, 10, 100, "Retur"),
+                ("Tank",        "temp_tank",       TEAL,  10, 100, "Lagertank"),
             ]):
-                col.plotly_chart(gauge_thermo(lbl, v.get(sensor), mn, mx, color),
-                                 use_container_width=True, config={"displayModeBar":False})
+                col.plotly_chart(
+                    gauge_semi(lbl, v.get(sensor), mn, mx, "°C", color, sub_text),
+                    use_container_width=True, config={"displayModeBar": False})
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown('<div class="section-title">Flöde, Effekt & Miljö</div>',
@@ -436,10 +437,10 @@ with tab_hist:
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis=dict(title="W/m²", color=AMBER, gridcolor=BORDER,
-                       titlefont=dict(color=AMBER), tickfont=dict(color=AMBER)),
-            yaxis2=dict(title="kW / m/s", color=RUST, overlaying="y", side="right",
-                        titlefont=dict(color=RUST), tickfont=dict(color=RUST),
+            yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                       tickfont=dict(color=AMBER), gridcolor=BORDER),
+            yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
+                        tickfont=dict(color=RUST), overlaying="y", side="right",
                         showgrid=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
@@ -477,10 +478,10 @@ with tab_hist:
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis =dict(title="°C",    color=TEXT,  gridcolor=BORDER,
-                        titlefont=dict(color=TEXT),  tickfont=dict(color=TEXT)),
-            yaxis2=dict(title="m³/h",  color=SLATE, overlaying="y", side="right",
-                        titlefont=dict(color=SLATE), tickfont=dict(color=SLATE),
+            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                       tickfont=dict(color=TEXT), gridcolor=BORDER),
+            yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                        tickfont=dict(color=SLATE), overlaying="y", side="right",
                         showgrid=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
