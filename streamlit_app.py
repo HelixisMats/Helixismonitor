@@ -88,57 +88,60 @@ def fetch_history(hours_back: int) -> pd.DataFrame:
 
 # ── SMHI fetcher + Supabase storage ──────────────────────────
 @st.cache_data(ttl=600)
-def fetch_smhi_and_store() -> dict[str, pd.DataFrame | None]:
-    """Fetch SMHI latest-day data, store new rows in smhi_readings table."""
-    result = {}
-    errors = {}
-    for key, (param, station) in SMHI.items():
-        # Try both latest-day and latest-hour periods
-        for period in ["latest-day", "latest-hour"]:
-            url = (f"https://opendata-download-metobs.smhi.se/api/version/latest"
-                   f"/parameter/{param}/station/{station}/period/{period}/data.json")
-            try:
-                r = requests.get(url, timeout=15)
-                if r.status_code != 200:
-                    errors[key] = f"HTTP {r.status_code} ({period})"
-                    continue
-                data = r.json()
-                rows = []
-                for entry in data.get("value", []):
-                    try:
-                        ts  = pd.to_datetime(entry["date"], unit="ms", utc=True)
-                        val = float(entry["value"])
-                        rows.append({"created_at": ts, "value": val})
-                    except Exception:
-                        continue
-                if not rows:
-                    errors[key] = f"Inga värden i svaret ({period})"
-                    continue
-                df = pd.DataFrame(rows).sort_values("created_at")
-                result[key] = df
-                errors.pop(key, None)
-                # Store in Supabase
+def fetch_smhi_and_store() -> tuple[dict, dict]:
+    """Fetch SMHI latest-day data. Returns (data_dict, error_dict)."""
+    # Correct SMHI station IDs for southern Sweden
+    # Parameter docs: https://opendata.smhi.se/apidocs/metobs/parameter.html
+    SMHI_PARAMS = {
+        "temperature": ("1",  "62040"),   # Helsingborg lufttemperatur
+        "wind_speed":  ("4",  "62040"),   # Helsingborg vindhastighet
+        "irradiance":  ("11", "98210"),   # Hoburg globalstrålning (closest active)
+        "cloud_cover": ("16", "62040"),   # Helsingborg molnighet
+    }
+    result, errors = {}, {}
+    for key, (param, station) in SMHI_PARAMS.items():
+        url = (f"https://opendata-download-metobs.smhi.se/api/version/latest"
+               f"/parameter/{param}/station/{station}/period/latest-day/data.json")
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                errors[key] = f"HTTP {r.status_code} · station {station} · param {param}"
+                result[key] = None
+                continue
+            data = r.json()
+            rows = []
+            for entry in data.get("value", []):
                 try:
-                    to_insert = [
-                        {"created_at": row["created_at"].isoformat(),
-                         "sensor": f"smhi_{key}",
-                         "value":  row["value"]}
-                        for _, row in df.iterrows()
-                    ]
-                    db.table("smhi_readings").upsert(
-                        to_insert, on_conflict="created_at,sensor"
-                    ).execute()
+                    ts  = pd.to_datetime(entry["date"], unit="ms", utc=True)
+                    val = float(entry["value"])
+                    rows.append({"created_at": ts, "value": val})
                 except Exception:
-                    pass
-                break  # Got data, stop trying periods
-            except requests.exceptions.ConnectionError:
-                errors[key] = "Nätverksfel — kontrollera Streamlit Cloud-inställningar"
-                break
-            except Exception as e:
-                errors[key] = str(e)
-    # Store error info for display
-    result["_errors"] = errors
-    return result
+                    continue
+            if not rows:
+                errors[key] = "Inga värden i API-svaret"
+                result[key] = None
+                continue
+            df = pd.DataFrame(rows).sort_values("created_at")
+            result[key] = df
+            # Store in Supabase
+            try:
+                to_insert = [
+                    {"created_at": row["created_at"].isoformat(),
+                     "sensor": f"smhi_{key}", "value": row["value"]}
+                    for _, row in df.iterrows()
+                ]
+                db.table("smhi_readings").upsert(
+                    to_insert, on_conflict="created_at,sensor"
+                ).execute()
+            except Exception:
+                pass
+        except requests.exceptions.ConnectionError as e:
+            errors[key] = f"Nätverksfel: {e}"
+            result[key] = None
+        except Exception as e:
+            errors[key] = str(e)
+            result[key] = None
+    return result, errors
 
 @st.cache_data(ttl=300)
 def fetch_smhi_history(hours_back: int) -> pd.DataFrame:
@@ -573,16 +576,14 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
 </div>""",unsafe_allow_html=True)
 
     with st.spinner("Hämtar SMHI-data och lagrar…"):
-        smhi_data = fetch_smhi_and_store()
+        smhi_data, smhi_errors = fetch_smhi_and_store()
 
-    # Show any fetch errors
-    errs = smhi_data.get("_errors", {})
-    if errs:
-        with st.expander(f"⚠️ {len(errs)} SMHI-källa(or) kunde inte hämtas", expanded=True):
-            for key, msg in errs.items():
+    if smhi_errors:
+        with st.expander(f"⚠️ {len(smhi_errors)} SMHI-källa(or) kunde inte hämtas"):
+            for key, msg in smhi_errors.items():
                 st.warning(f"**{key}**: {msg}")
-            st.caption("SMHI-data hämtas från Streamlit Cloud. Kontrollera att "
-                       "utgående nätverkstrafik är tillåten.")
+            st.caption("Stationer: Helsingborg (62040) för temp/vind/moln, "
+                       "Hoburg (98210) för globalstrålning.")
 
     # Current SMHI values
     smhi_defs = {
