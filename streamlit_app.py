@@ -596,7 +596,7 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
     tile_specs = []
     for key,(label,unit,mn,mx,color,dec) in smhi_defs.items():
         df_s = smhi_data.get(key)
-        val = float(df_s["value"].iloc[-1]) if df_s is not None and not df_s.empty else None
+        val = float(df_s["value"].iloc[-1]) if isinstance(df_s, pd.DataFrame) and not df_s.empty else None
         smhi_latest[key] = val
         tile_specs.append((label,val,unit,mn,mx,color,dec,None))
 
@@ -617,7 +617,7 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
 
     smhi_ts = None
     for df_s in smhi_data.values():
-        if df_s is not None and not df_s.empty:
+        if isinstance(df_s, pd.DataFrame) and not df_s.empty:
             smhi_ts = df_s["created_at"].iloc[-1].astimezone(SWE)
             break
     if smhi_ts:
