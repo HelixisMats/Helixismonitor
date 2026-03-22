@@ -416,33 +416,30 @@ with tab_hist:
         st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
                     unsafe_allow_html=True)
         fig_solar = go.Figure()
-        # Vänster y-axel: kW och W/m² (skalas om till liknande skala)
-        for sensor, color, name, yaxis in [
-            ("irradiance", AMBER, "Instrålning (W/m²)", "y"),
-            ("power",      RUST,  "Termisk effekt (kW)", "y2"),
-            ("wind",       SLATE, "Vind (m/s)",          "y3"),
+        # Vänster axel: instrålning W/m²
+        # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
+        for sensor, color, name, yaxis, dash in [
+            ("irradiance", AMBER, "Instrålning (W/m²)",  "y",  "solid"),
+            ("power",      RUST,  "Termisk effekt (kW)", "y2", "solid"),
+            ("wind",       SLATE, "Vind (m/s)",          "y2", "dot"),
         ]:
             sub = df_hist[df_hist["sensor"] == sensor]
             if not sub.empty:
                 fig_solar.add_trace(go.Scatter(
                     x=sub["created_at"], y=sub["value"],
                     name=name, mode="lines",
-                    line=dict(width=1.8, color=color),
+                    line=dict(width=1.8, color=color, dash=dash),
                     yaxis=yaxis,
                 ))
         fig_solar.update_layout(
-            height=320, margin=dict(l=0, r=60, t=10, b=0),
+            height=320, margin=dict(l=0, r=50, t=10, b=0),
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis =dict(title="W/m²",  color=AMBER, gridcolor=BORDER,
-                        titlefont=dict(color=AMBER), tickfont=dict(color=AMBER)),
-            yaxis2=dict(title="kW",    color=RUST,  overlaying="y", side="right",
-                        titlefont=dict(color=RUST),  tickfont=dict(color=RUST),
-                        showgrid=False),
-            yaxis3=dict(title="m/s",   color=SLATE, overlaying="y", side="right",
-                        anchor="free", position=1.0,
-                        titlefont=dict(color=SLATE), tickfont=dict(color=SLATE),
+            yaxis=dict(title="W/m²", color=AMBER, gridcolor=BORDER,
+                       titlefont=dict(color=AMBER), tickfont=dict(color=AMBER)),
+            yaxis2=dict(title="kW / m/s", color=RUST, overlaying="y", side="right",
+                        titlefont=dict(color=RUST), tickfont=dict(color=RUST),
                         showgrid=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
