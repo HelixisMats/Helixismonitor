@@ -186,6 +186,16 @@ def latest_val(df, sensor):
 def fmt(val, decimals=1, unit=""):
     return f"{val:.{decimals}f} {unit}".strip() if val is not None else "—"
 
+def sky_condition(irr):
+    """Map irradiance W/m² → label, icon, color."""
+    if irr is None:          return "—",              "❓", MUTED
+    if irr >= 850:           return "Klarsolsken",    "☀️",  AMBER
+    if irr >= 600:           return "Soligt",         "🌤",  AMBER
+    if irr >= 350:           return "Halvklart",      "⛅",  SLATE
+    if irr >= 100:           return "Molnigt",        "🌥",  MUTED
+    if irr >= 20:            return "Mulet",          "☁️",  MUTED
+    return                          "Natt / ingen sol","🌙", MUTED
+
 def integrate_power(df) -> float | None:
     """Trapezoid integration of power → kWh. Pass a pre-filtered DataFrame."""
     sub = df[df["sensor"] == "power"].sort_values("created_at") if "sensor" in df.columns else df.sort_values("created_at")
@@ -329,6 +339,17 @@ with tab_live:
 
         df_today_pwr  = fetch_today_power()
         energy_today  = integrate_power(df_today_pwr)
+
+        sky_label, sky_icon, sky_color = sky_condition(irr)
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:10px;margin:6px 0 10px'>"
+            f"<span style='font-size:1.8rem;line-height:1'>{sky_icon}</span>"
+            f"<span style='font-size:1.05rem;font-weight:600;color:{sky_color}'>{sky_label}</span>"
+            f"<span style='font-size:.8rem;color:{MUTED};margin-left:4px'>"
+            f"{'· ' + fmt(irr, 0, 'W/m²') if irr is not None else ''}"
+            f"</span></div>",
+            unsafe_allow_html=True,
+        )
 
         if view_mode == "🎯 Gauges":
             # ── Temperatures (semi gauges) ──
