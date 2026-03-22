@@ -419,12 +419,8 @@ def gauge_semi(label, val, mn, mx, unit, color, sub_text="", warn=None):
             "steps":steps,
             **({"threshold":threshold} if threshold else {}),
         },
-        title={"text":(f"<span style='font-weight:600;font-size:12px;color:{TEXT}'>{label}</span>"
-                       f"<br><span style='font-size:10px;color:{MUTED if sub_text else "rgba(0,0,0,0)"}'>"
-                       f"{sub_text if sub_text else "&nbsp;"}</span>"),
-               "font":{"size":12,"family":"Inter"}},
     ))
-    fig.update_layout(height=200,margin=dict(l=20,r=20,t=70,b=8),
+    fig.update_layout(height=185, margin=dict(l=20,r=20,t=10,b=8),
                       paper_bgcolor="rgba(0,0,0,0)")
     return fig
 
@@ -535,29 +531,35 @@ with tab_live:
                 ("return",      "temp_return",     SLATE, 10, 100, "ret_sub"),
                 ("tank",        "temp_tank",       TEAL,  10, 100, "tank_sub"),
             ]):
+                col.markdown(
+                    f"<div style='text-align:center;margin-bottom:-8px'>"
+                    f"<span style='font-size:12px;font-weight:600;color:{TEXT}'>{T[lbl_key]}</span><br>"
+                    f"<span style='font-size:10px;color:{MUTED}'>{T[sub_key]}</span></div>",
+                    unsafe_allow_html=True)
                 col.plotly_chart(
-                    gauge_semi(T[lbl_key], v.get(sensor), mn, mx, "°C", color, T[sub_key]),
+                    gauge_semi(T[lbl_key], v.get(sensor), mn, mx, "°C", color),
                     use_container_width=True, config={"displayModeBar": False})
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             g1,g2,g3,g4 = st.columns(4)
-            with g1:
-                st.plotly_chart(gauge_semi(T["flow"],v.get("flow"),0,1,"m³/h",SLATE,
-                    T["htf_sub"]),use_container_width=True,config={"displayModeBar":False})
-            with g2:
-                st.plotly_chart(gauge_semi(T["power"],v.get("power"),0,9.2,"kW",RUST,
-                    T["max_power_sub"]),use_container_width=True,config={"displayModeBar":False})
-            with g3:
-                irr_sub = (T["irr_excellent"] if (irr and irr>700) else
-                           T["irr_moderate"]  if (irr and irr>200) else T["irr_low"])
-                st.plotly_chart(gauge_semi(T["irradiance"],irr,0,1350,"W/m²",irr_color,
-                    f"{irr_sub} · max ~1350 W/m²"),use_container_width=True,config={"displayModeBar":False})
-            with g4:
-                psub = T["near_max_sub"] if (pres and pres>=5) else T["op_range_sub"]
-                st.plotly_chart(gauge_semi(T["pressure"],pres,0,6,"bar",pcolor,
-                    psub,warn=5),use_container_width=True,config={"displayModeBar":False})
+            def gauge_col(col, title, sub, val, mn, mx, unit, color, warn=None):
+                col.markdown(
+                    f"<div style='text-align:center;margin-bottom:-8px'>"
+                    f"<span style='font-size:12px;font-weight:600;color:{TEXT}'>{title}</span><br>"
+                    f"<span style='font-size:10px;color:{MUTED}'>{sub}</span></div>",
+                    unsafe_allow_html=True)
+                col.plotly_chart(gauge_semi(title, val, mn, mx, unit, color, warn=warn),
+                    use_container_width=True, config={"displayModeBar": False})
+
+            irr_sub = (T["irr_excellent"] if (irr and irr>700) else
+                       T["irr_moderate"]  if (irr and irr>200) else T["irr_low"])
+            psub = T["near_max_sub"] if (pres and pres>=5) else T["op_range_sub"]
+            gauge_col(g1, T["flow"],      T["htf_sub"],                v.get("flow"),  0,    1,    "m³/h", SLATE)
+            gauge_col(g2, T["power"],     T["max_power_sub"],          v.get("power"), 0,    9.2,  "kW",   RUST)
+            gauge_col(g3, T["irradiance"],f"{irr_sub} · max ~1350 W/m²", irr,          0,    1350, "W/m²", irr_color)
+            gauge_col(g4, T["pressure"],  psub,                        pres,           0,    6,    "bar",  pcolor, warn=5)
 
             # ── Energy (HTML tiles) ──
             st.markdown(f'<div class="section-title">{T["energy"]}</div>',
