@@ -39,15 +39,35 @@ st.markdown(f"""<style>
   .block-container{{padding-top:1.2rem!important;padding-bottom:1.5rem;background:{BG};max-width:1400px;}}
   .stApp{{background:{BG};}}
   section[data-testid="stSidebar"]{{background:{BG2};border-right:1px solid {BORDER};}}
-  .section-title{{font-size:.62rem;font-weight:700;color:{TEXT};text-transform:uppercase;
-    letter-spacing:.12em;margin:20px 0 8px;border-left:3px solid {BLUE};padding-left:8px;}}
+
+  /* Metric tiles */
+  div[data-testid="metric-container"]{{background:{BG2};border:1px solid {BORDER};border-radius:8px;padding:14px 18px;}}
+  div[data-testid="metric-container"] label{{font-size:.72rem!important;color:{TEXT}!important;text-transform:uppercase;letter-spacing:.08em;font-weight:700!important;}}
+  div[data-testid="metric-container"] [data-testid="stMetricValue"]{{color:{TEXT}!important;font-size:1.5rem!important;font-weight:700!important;}}
+
+  /* Section titles */
+  .section-title{{font-size:.68rem;font-weight:700;color:{TEXT};text-transform:uppercase;
+    letter-spacing:.1em;margin:20px 0 10px;border-left:3px solid {BLUE};padding-left:10px;}}
+
+  /* Status */
   .status-dot{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;}}
-  .ts-text{{font-size:.82rem;color:{TEXT};vertical-align:middle;font-weight:500;}}
-  div[data-testid="metric-container"] label{{font-size:.7rem;color:{TEXT};text-transform:uppercase;letter-spacing:.08em;font-weight:600;}}
-  div[data-testid="metric-container"] [data-testid="stMetricValue"]{{color:{TEXT};font-size:1.4rem;font-weight:700;}}
-  .stTabs [data-baseweb="tab"]{{font-size:.8rem;font-weight:600;padding:8px 10px;}}
-  .stTabs [data-baseweb="tab-list"]{{gap:2px;}}
-</style>""", unsafe_allow_html=True)
+  .ts-text{{font-size:.85rem;color:{TEXT};vertical-align:middle;font-weight:500;}}
+
+  /* Tabs — compact for mobile */
+  .stTabs [data-baseweb="tab-list"]{{gap:0px!important;}}
+  .stTabs [data-baseweb="tab"]{{
+    font-size:.78rem!important;font-weight:700!important;
+    padding:6px 8px!important;white-space:nowrap;
+    color:{TEXT}!important;
+  }}
+  .stTabs [aria-selected="true"]{{
+    color:{BLUE}!important;border-bottom:2px solid {BLUE}!important;
+  }}
+
+  /* Plotly toolbar hidden */
+  .modebar{{display:none!important;}}
+</style>
+""", unsafe_allow_html=True)
 
 # ── DB ────────────────────────────────────────────────────────
 @st.cache_resource
