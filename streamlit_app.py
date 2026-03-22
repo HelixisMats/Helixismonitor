@@ -91,39 +91,53 @@ def fetch_history(hours_back: int) -> pd.DataFrame:
 def fetch_smhi_and_store() -> dict[str, pd.DataFrame | None]:
     """Fetch SMHI latest-day data, store new rows in smhi_readings table."""
     result = {}
+    errors = {}
     for key, (param, station) in SMHI.items():
-        url = (f"https://opendata-download-metobs.smhi.se/api/version/latest"
-               f"/parameter/{param}/station/{station}/period/latest-day/data.json")
-        try:
-            r = requests.get(url, timeout=10); r.raise_for_status()
-            data = r.json()
-            rows = []
-            for v in data.get("value", []):
-                try:
-                    ts  = pd.to_datetime(v["date"], unit="ms", utc=True)
-                    val = float(v["value"])
-                    rows.append({"created_at": ts, "value": val})
-                except Exception:
-                    continue
-            if not rows:
-                result[key] = None; continue
-            df = pd.DataFrame(rows).sort_values("created_at")
-            result[key] = df
-            # Store in Supabase (upsert by timestamp+sensor)
+        # Try both latest-day and latest-hour periods
+        for period in ["latest-day", "latest-hour"]:
+            url = (f"https://opendata-download-metobs.smhi.se/api/version/latest"
+                   f"/parameter/{param}/station/{station}/period/{period}/data.json")
             try:
-                to_insert = [
-                    {"created_at": r["created_at"].isoformat(),
-                     "sensor": f"smhi_{key}",
-                     "value":  r["value"]}
-                    for _, r in df.iterrows()
-                ]
-                db.table("smhi_readings").upsert(
-                    to_insert, on_conflict="created_at,sensor"
-                ).execute()
-            except Exception:
-                pass  # Table may not exist yet — fail silently
-        except Exception:
-            result[key] = None
+                r = requests.get(url, timeout=15)
+                if r.status_code != 200:
+                    errors[key] = f"HTTP {r.status_code} ({period})"
+                    continue
+                data = r.json()
+                rows = []
+                for entry in data.get("value", []):
+                    try:
+                        ts  = pd.to_datetime(entry["date"], unit="ms", utc=True)
+                        val = float(entry["value"])
+                        rows.append({"created_at": ts, "value": val})
+                    except Exception:
+                        continue
+                if not rows:
+                    errors[key] = f"Inga värden i svaret ({period})"
+                    continue
+                df = pd.DataFrame(rows).sort_values("created_at")
+                result[key] = df
+                errors.pop(key, None)
+                # Store in Supabase
+                try:
+                    to_insert = [
+                        {"created_at": row["created_at"].isoformat(),
+                         "sensor": f"smhi_{key}",
+                         "value":  row["value"]}
+                        for _, row in df.iterrows()
+                    ]
+                    db.table("smhi_readings").upsert(
+                        to_insert, on_conflict="created_at,sensor"
+                    ).execute()
+                except Exception:
+                    pass
+                break  # Got data, stop trying periods
+            except requests.exceptions.ConnectionError:
+                errors[key] = "Nätverksfel — kontrollera Streamlit Cloud-inställningar"
+                break
+            except Exception as e:
+                errors[key] = str(e)
+    # Store error info for display
+    result["_errors"] = errors
     return result
 
 @st.cache_data(ttl=300)
@@ -259,7 +273,7 @@ st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:6px 0 
             unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────
-tab_live, tab_hist, tab_smhi = st.tabs(["🔴  Live", "📈  Historik", "🌤  SMHI & Analys"])
+tab_live, tab_hist, tab_smhi, tab_om = st.tabs(["🔴  Live", "📈  Historik", "🌤  SMHI & Analys", "ℹ️  Om systemet"])
 
 # ════════════════════════════════════════════════════════════════
 # LIVE TAB
@@ -448,14 +462,39 @@ with tab_hist:
         fig_solar.update_xaxes(showgrid=False, color=MUTED)
         st.plotly_chart(fig_solar, use_container_width=True)
 
-        # ── 2. Temperaturer ───────────────────────────────────
-        st.markdown('<div class="section-title">Temperaturer</div>',
+        # ── 2. Temperaturer & Tryck ──────────────────────────
+        st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
                     unsafe_allow_html=True)
         temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
-        st.plotly_chart(
-            linechart(df_hist, temp_sensors,
-                      [cmap[s] for s in temp_sensors], "°C", height=300),
-            use_container_width=True)
+        fig_temp = go.Figure()
+        for s in temp_sensors:
+            sub = df_hist[df_hist["sensor"] == s]
+            if not sub.empty:
+                names_map = {"temp_right_coll":"Collector R","temp_left_coll":"Collector L",
+                             "temp_forward":"Forward","temp_return":"Return","temp_tank":"Tank"}
+                fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
+                    name=names_map[s], mode="lines",
+                    line=dict(width=1.8, color=cmap[s]), yaxis="y"))
+        sub_p = df_hist[df_hist["sensor"] == "pressure"]
+        if not sub_p.empty:
+            fig_temp.add_trace(go.Scatter(x=sub_p["created_at"], y=sub_p["value"],
+                name="Tryck (bar)", mode="lines",
+                line=dict(width=1.5, color=SLATE, dash="dot"), yaxis="y2"))
+        fig_temp.update_layout(
+            height=320, margin=dict(l=0, r=50, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=10, color=MUTED, family="Inter")),
+            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                       tickfont=dict(color=TEXT), gridcolor=BORDER),
+            yaxis2=dict(title=dict(text="bar", font=dict(color=SLATE)),
+                        tickfont=dict(color=SLATE), overlaying="y", side="right",
+                        showgrid=False, range=[0, 8]),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"),
+        )
+        fig_temp.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_temp, use_container_width=True)
 
         # ── 3. ΔT & Flöde ─────────────────────────────────────
         st.markdown('<div class="section-title">ΔT & Flöde</div>',
@@ -489,14 +528,7 @@ with tab_hist:
         fig_dt.update_xaxes(showgrid=False, color=MUTED)
         st.plotly_chart(fig_dt, use_container_width=True)
 
-        # ── 4. Systemtryck ────────────────────────────────────
-        st.markdown('<div class="section-title">Systemtryck</div>',
-                    unsafe_allow_html=True)
-        st.plotly_chart(
-            linechart(df_hist, ["pressure"], [SLATE], "bar", height=220),
-            use_container_width=True)
-
-        # ── 5. Sammanfattning & Energi ────────────────────────
+        # ── 4. Sammanfattning & Energi ────────────────────────
         st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
                     unsafe_allow_html=True)
         all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
@@ -542,6 +574,15 @@ SMHI öppen data (CC BY) · <b>Ängelholm</b> (station 63600) — temp, vind, mo
 
     with st.spinner("Hämtar SMHI-data och lagrar…"):
         smhi_data = fetch_smhi_and_store()
+
+    # Show any fetch errors
+    errs = smhi_data.get("_errors", {})
+    if errs:
+        with st.expander(f"⚠️ {len(errs)} SMHI-källa(or) kunde inte hämtas", expanded=True):
+            for key, msg in errs.items():
+                st.warning(f"**{key}**: {msg}")
+            st.caption("SMHI-data hämtas från Streamlit Cloud. Kontrollera att "
+                       "utgående nätverkstrafik är tillåten.")
 
     # Current SMHI values
     smhi_defs = {
@@ -679,16 +720,41 @@ CREATE INDEX IF NOT EXISTS idx_smhi_ts     ON smhi_readings(created_at DESC);
 - `smhi_cloud_cover` — molnighet okta 0–8 (Ängelholm)
 """)
 
-# ── Sidebar ───────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown(f"<div style='color:{TEXT};font-weight:600;font-size:.9rem;margin-bottom:12px'>Om systemet</div>",
-                unsafe_allow_html=True)
-    st.markdown(f"""<div style='font-size:.75rem;color:{MUTED};line-height:1.9'>
+# ── Om systemet tab ──────────────────────────────────────────
+with tab_om:
+    c_sys, c_map = st.columns([1, 1])
+    with c_sys:
+        st.markdown(f"<div class='section-title'>Systemspecifikation</div>",
+                    unsafe_allow_html=True)
+        st.markdown(f"""<div style='font-size:.85rem;color:{MUTED};line-height:2.1'>
 <b style='color:{TEXT}'>Helixis LC12 HW</b><br>
 Linear Concentrator — CSP<br>
 Aperture: 12.35 m² · 380 kg<br>
 Peak output: 9.2 kW @ 1000 W/m²<br>
-Max temp: 160°C · Max pressure: 6 bar<br><br>
-<b style='color:{TEXT}'>Plats</b><br>
-Eket, Örkelljunga<br>56.248°N · 13.192°E
-</div>""",unsafe_allow_html=True)
+Max temp: 160°C · Max pressure: 6 bar
+</div>""", unsafe_allow_html=True)
+
+        st.markdown(f"<div class='section-title' style='margin-top:24px'>Geografisk placering</div>",
+                    unsafe_allow_html=True)
+        st.markdown(f"""<div style='font-size:.85rem;color:{MUTED};line-height:2.1'>
+<b style='color:{TEXT}'>Eket, Örkelljunga</b><br>
+Koordinater: 56.248°N · 13.192°E<br>
+Höjd ö.h.: ~130 m<br>
+Region: Skåne
+</div>""", unsafe_allow_html=True)
+
+    with c_map:
+        st.markdown(f"<div class='section-title'>Flygfoto — Eket</div>",
+                    unsafe_allow_html=True)
+        if os.path.exists("eket_aerial.png"):
+            st.image("eket_aerial.png", caption="Eket, Örkelljunga · © Google Maps",
+                     use_container_width=True)
+        else:
+            st.info("Lägg till eket_aerial.png i repot för att visa flygfoto.")
+
+# ── Sidebar (minimal) ─────────────────────────────────────────
+with st.sidebar:
+    st.markdown(f"<div style='color:{TEXT};font-weight:600;font-size:.9rem;margin-bottom:8px'>Helixis LC12</div>",
+                unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:.72rem;color:{MUTED}'>Eket · Örkelljunga · 56.248°N</div>",
+                unsafe_allow_html=True)
