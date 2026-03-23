@@ -1103,26 +1103,36 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
     st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
                 unsafe_allow_html=True)
 
-    since_dt = datetime.now(timezone.utc) - timedelta(hours=h_cmp)
-    df_cmp   = fetch_history(h_cmp)
+    df_cmp = fetch_history(h_cmp)
 
-    # Filter STRÅNG to period
-    df_st = df_strang[df_strang["created_at"] >= since_dt] if not df_strang.empty else pd.DataFrame()
+    # All variables initialized — safe even if STRÅNG/sensor data is missing
+    APERTURE = 12.35
+    kt_current = None; dni_est_current = None; p_theoretical = None
+    ETA_OPT = 0.65; merged = pd.DataFrame()
+    eta_clear = pd.DataFrame(); eta_df = pd.DataFrame()
+    eta_median = eta_p90 = eta_p95 = eta_max = None; n_pts = 0
+    irr_live = df_cmp[df_cmp["sensor"]=="irradiance"].sort_values("created_at")
+    pwr_live = df_cmp[df_cmp["sensor"]=="power"].sort_values("created_at")
+    p_actual = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
 
-    # Compute kt and theoretical power
-    kt_current = None
-    dni_est_current = None
-    p_theoretical = None
+    # Clip STRÅNG to actual sensor window
+    df_st = pd.DataFrame()
+    if not df_strang.empty and not irr_live.empty:
+        s_t0 = irr_live["created_at"].min()
+        s_t1 = irr_live["created_at"].max()
+        df_st = df_strang[
+            (df_strang["created_at"] >= s_t0) &
+            (df_strang["created_at"] <= s_t1)
+        ].copy()
 
-    APERTURE = 12.35  # m² — LC12 aperture area
-
-    if not df_st.empty and not df_cmp.empty:
-        ghi_st = df_st[df_st["sensor"] == "ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
-        dni_st = df_st[df_st["sensor"] == "dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
-        merged = pd.merge_asof(ghi_st.sort_values("created_at"),
-                               dni_st.sort_values("created_at"),
-                               on="created_at", tolerance=pd.Timedelta("30min"))
-        merged = merged[merged["ghi_m"] > 50].dropna()
+    if not df_st.empty:
+        ghi_st = df_st[df_st["sensor"]=="ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
+        dni_st = df_st[df_st["sensor"]=="dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
+        if not ghi_st.empty and not dni_st.empty:
+            merged = pd.merge_asof(ghi_st.sort_values("created_at"),
+                                   dni_st.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("30min"))
+            merged = merged[merged["ghi_m"] > 20].dropna()
         if not merged.empty:
             merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, None)
 
