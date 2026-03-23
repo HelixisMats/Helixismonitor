@@ -1181,22 +1181,24 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                     (kt_df["created_at"] <= sensor_t1)
                 ].copy()
 
-                # Step 1: merge sensor irradiance + power (tight 2 min — same clock)
+                # Step 1: merge sensor irradiance + power (tight 5 min — same clock)
                 eta_df = pd.merge_asof(
                     irr_day.sort_values("created_at"),
                     pwr_df.sort_values("created_at"),
-                    on="created_at", tolerance=pd.Timedelta("2min"))
+                    on="created_at", tolerance=pd.Timedelta("5min"))
                 eta_df = eta_df.dropna(subset=["ghi_s","p_meas"])
 
-                # Step 2: join STRÅNG kt — STRICT 65 min max (just over one hour)
-                # This prevents STRÅNG values from being carried across gaps where
-                # STRÅNG data doesn't exist. Only use rows where STRÅNG is actually present.
+                # Step 2: join STRÅNG kt using nearest-neighbor within 65 min
+                # merge_asof is backward-looking — use direction="nearest" to catch
+                # both sides of the STRÅNG hour boundary
                 eta_df = pd.merge_asof(
                     eta_df.sort_values("created_at"),
                     kt_day.sort_values("created_at"),
-                    on="created_at", tolerance=pd.Timedelta("65min"))
+                    on="created_at",
+                    tolerance=pd.Timedelta("65min"),
+                    direction="nearest")
 
-                # Strict: drop ALL rows where either dataset is missing
+                # Only keep rows where ALL three datasets are present
                 eta_df = eta_df.dropna(subset=["ghi_s","p_meas","kt"])
 
                 if not eta_df.empty:
@@ -1330,9 +1332,13 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                 st.warning(f"η (p90) = {eta_p90:.3f} — outside plausible range 0.30–0.85. "
                            "Likely STRÅNG/sensor timestamp mismatch. Try a clearer period.")
             else:
-                st.info("Optical efficiency: insufficient qualifying samples in this window. "
-                        "Need GHI > 400 W/m² and P > 1 kW simultaneously. "
-                        "Select a longer window or a clear sunny day.")
+                # Debug info — show why no samples qualified
+                n_total   = len(eta_df) if not eta_df.empty else 0
+                n_day     = len(eta_df[eta_df["ghi_s"] > 400]) if not eta_df.empty else 0
+                n_running = len(eta_df[(eta_df["ghi_s"] > 400) & (eta_df["p_meas"] > 1.0)])                             if not eta_df.empty else 0
+                st.info(f"Optical efficiency: insufficient qualifying samples. "
+                        f"Overlap rows: {n_total} · GHI>400: {n_day} · GHI>400 & P>1kW: {n_running}. "
+                        f"Select a window with clear sun and system running.")
 
             if efficiency_pct is not None:
                 eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
@@ -1391,19 +1397,19 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
         irr_df = df_cmp[df_cmp["sensor"] == "irradiance"][["created_at","value"]].rename(columns={"value":"ghi_sensor"})
         kt_df  = merged[["created_at","kt"]]
 
-        # Strict join — only compute theoretical power where STRÅNG data actually exists
-        # 65 min tolerance = just over one STRÅNG hour interval, prevents gap-filling
+        # Merge: sensor power + irradiance (tight), then STRÅNG kt (nearest hourly)
         tmp = pd.merge_asof(pwr_df.sort_values("created_at"),
                             irr_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("2min"))
+                            on="created_at", tolerance=pd.Timedelta("5min"))
         tmp = pd.merge_asof(tmp.sort_values("created_at"),
                             kt_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("65min"))
-        # Drop any row missing STRÅNG kt — no forward fill across gaps
+                            on="created_at", tolerance=pd.Timedelta("65min"),
+                            direction="nearest")
+        # Drop rows where STRÅNG is absent — genuine gaps show as breaks in chart
         tmp = tmp.dropna(subset=["power","ghi_sensor","kt"])
         if not tmp.empty:
-            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 *
-                                    (ETA_OPT if "ETA_OPT" in dir() else 0.65) / 1000).clip(0, 15)
+            _eta = ETA_OPT if (isinstance(ETA_OPT, float) and 0.3 < ETA_OPT < 0.85) else 0.65
+            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 * _eta / 1000).clip(0, 15)
 
             fig_pwr = go.Figure()
             fig_pwr.add_trace(go.Scatter(
