@@ -565,18 +565,27 @@ with tab_live:
             # ── Temperatures (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["temperatures"]}</div>',
                         unsafe_allow_html=True)
-            tc = st.columns(5)
+            tc = st.columns(6)
             temp_specs = [
-                ("collector_r","temp_right_coll", 20,160,110,140,"g_cr"),
-                ("collector_l","temp_left_coll",  20,160,110,140,"g_cl"),
-                ("forward",    "temp_forward",    20,120, 85,105,"g_fw"),
-                ("return",     "temp_return",     10,100, 60, 85,"g_rt"),
-                ("tank",       "temp_tank",       10,100, 70, 90,"g_tk"),
+                ("collector_r","temp_right_coll", 20,160,"g_cr"),
+                ("collector_l","temp_left_coll",  20,160,"g_cl"),
+                ("forward",    "temp_forward",    20,120,"g_fw"),
+                ("return",     "temp_return",     10,100,"g_rt"),
+                ("tank",       "temp_tank",       10,100,"g_tk"),
             ]
-            for col,(lbl_key,sensor,mn,mx,green_end,warn_start,gkey) in zip(tc,temp_specs):
+            for col,(lbl_key,sensor,mn,mx,gkey) in zip(tc,temp_specs):
                 with col:
                     render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
                         mode="temp", key=gkey)
+            # Outside temperature from SMHI (last stored value)
+            with tc[5]:
+                smhi_now, _ = fetch_smhi_and_store()
+                outside_temp = None
+                df_ot = smhi_now.get("temperature")
+                if isinstance(df_ot, pd.DataFrame) and not df_ot.empty:
+                    outside_temp = float(df_ot["value"].iloc[-1])
+                render_echarts_gauge("Outside (SMHI)", outside_temp, -25, 40, "°C",
+                    mode="temp", key="g_outside")
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
