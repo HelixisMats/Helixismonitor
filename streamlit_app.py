@@ -1188,169 +1188,129 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                     on="created_at", tolerance=pd.Timedelta("5min"))
                 eta_df = eta_df.dropna(subset=["ghi_s","p_meas"])
 
-                # Step 2: join STRÅNG kt using nearest-neighbor within 65 min
-                # merge_asof is backward-looking — use direction="nearest" to catch
-                # both sides of the STRÅNG hour boundary
-                eta_df = pd.merge_asof(
-                    eta_df.sort_values("created_at"),
-                    kt_day.sort_values("created_at"),
-                    on="created_at",
-                    tolerance=pd.Timedelta("65min"),
-                    direction="nearest")
+    # ── kt tiles ──────────────────────────────────────
+    kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
+    efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
 
-                # Only keep rows where ALL three datasets are present
-                eta_df = eta_df.dropna(subset=["ghi_s","p_meas","kt"])
+    render_tiles([
+        ("Clearness index kt",    kt_current,      "",     0, 1.2,  kt_color, 2, None),
+        ("DNI estimated",         dni_est_current, "W/m²", 0, 1500, AMBER,    0, None),
+        ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
+        ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
+    ])
+    # Show what data range was actually used
+    if not df_st.empty and not df_cmp.empty:
+        st_t0 = df_st["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+        st_t1 = df_st["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+        s_t0  = df_cmp["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+        s_t1  = df_cmp["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+        n_sensor = len(df_cmp[df_cmp["sensor"]=="irradiance"])
+        n_strang = len(df_st)
+        st.caption(f"Data used — sensor: {s_t0} → {s_t1} ({n_sensor} pts) · "
+                   f"STRÅNG: {st_t0} → {st_t1} ({n_strang} pts)")
+    if kt_current is None:
+        st.caption("⚠ kt: no STRÅNG value within ±3h of latest sensor reading. "
+                   "STRÅNG is hourly — analysis uses historical η from the window.")
 
-                if not eta_df.empty:
-                    eta_df["dni_est"] = eta_df["kt"] * eta_df["ghi_s"]
-                    eta_df["eta_raw"] = eta_df["p_meas"] / (
-                        eta_df["dni_est"] * APERTURE / 1000
-                    )
-                    # Filter: GHI > 400 (good sun), P > 1 kW (running), η in [0.10, 0.90]
-                    eta_clear = eta_df[
-                        (eta_df["ghi_s"]   > 400) &
-                        (eta_df["p_meas"]  > 1.0) &
-                        (eta_df["eta_raw"] > 0.10) &
-                        (eta_df["eta_raw"] < 0.90)
-                    ].copy()
-                else:
-                    eta_clear = pd.DataFrame()
+    # ── Optical efficiency — headline + time series ────
+    st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
+                unsafe_allow_html=True)
 
-                eta_median = float(eta_clear["eta_raw"].median()) if not eta_clear.empty else None
-                eta_p90    = float(eta_clear["eta_raw"].quantile(0.90)) if not eta_clear.empty else None
-                eta_p95    = float(eta_clear["eta_raw"].quantile(0.95)) if not eta_clear.empty else None
-                eta_max    = float(eta_clear["eta_raw"].max())          if not eta_clear.empty else None
-                n_pts      = len(eta_clear)
+    if eta_p90 is not None and n_pts > 5 and 0.30 < eta_p90 < 0.85:
+        eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
 
-                # Use p90 as the representative "peak" η for theoretical power
-                # p90 filters out the top 10% outliers (sensor noise, reflections)
-                # while still representing genuine high-performance operation
-                ETA_OPT = eta_p90 if (eta_p90 and 0.30 < eta_p90 < 0.85) else                           (eta_median if (eta_median and 0.30 < eta_median < 0.85) else 0.65)
-                p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000                     if dni_est_current is not None else None
+        # Headline metric card
+        st.markdown(
+            f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
+            f"border-left:3px solid {eta_color};margin:4px 0 12px'>"
+            f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
+            f"letter-spacing:.08em;margin-bottom:4px'>Peak optical efficiency η* (p90, correlated)</div>"
+            f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
+            f"<span style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}</span>"
+            f"<span style='font-size:.85rem;color:{MUTED}'>"
+            f"median {eta_median:.3f} &nbsp;·&nbsp; "
+            f"p95 {eta_p95:.3f} &nbsp;·&nbsp; "
+            f"max {eta_max:.3f} &nbsp;·&nbsp; "
+            f"n={n_pts} samples</span>"
+            f"</div>"
+            f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
+            f"* p90 = 90th percentile — representative peak, filters top 10% noise. "
+            f"η = P_kW ÷ (DNI_est × {APERTURE} m²). "
+            f"DNI_est = kt_STRÅNG × GHI_sensor (±10–15%). "
+            f"LC12 manufacturer spec: η_peak ≈ 0.72."
+            f"</div></div>",
+            unsafe_allow_html=True
+        )
 
-            # ── kt tiles ──────────────────────────────────────
-            kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
-            efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
+        # Time series chart of η per measurement point
+        fig_eta = go.Figure()
 
-            render_tiles([
-                ("Clearness index kt",    kt_current,      "",     0, 1.2,  kt_color, 2, None),
-                ("DNI estimated",         dni_est_current, "W/m²", 0, 1500, AMBER,    0, None),
-                ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
-                ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
-            ])
-            # Show what data range was actually used
-            if not df_st.empty and not df_cmp.empty:
-                st_t0 = df_st["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
-                st_t1 = df_st["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
-                s_t0  = df_cmp["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
-                s_t1  = df_cmp["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
-                n_sensor = len(df_cmp[df_cmp["sensor"]=="irradiance"])
-                n_strang = len(df_st)
-                st.caption(f"Data used — sensor: {s_t0} → {s_t1} ({n_sensor} pts) · "
-                           f"STRÅNG: {st_t0} → {st_t1} ({n_strang} pts)")
-            if kt_current is None:
-                st.caption("⚠ kt: no STRÅNG value within ±3h of latest sensor reading. "
-                           "STRÅNG is hourly — analysis uses historical η from the window.")
+        # All qualifying points as scatter
+        fig_eta.add_trace(go.Scatter(
+            x=eta_clear["created_at"], y=eta_clear["eta_raw"],
+            name="η per sample",
+            mode="markers",
+            marker=dict(color=SLATE, size=4, opacity=0.5),
+        ))
 
-            # ── Optical efficiency — headline + time series ────
-            st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
-                        unsafe_allow_html=True)
+        # Rolling median (window=10 points) as smoothed line
+        eta_sorted = eta_clear.sort_values("created_at")
+        eta_rolling = eta_sorted["eta_raw"].rolling(10, min_periods=3, center=True).median()
+        fig_eta.add_trace(go.Scatter(
+            x=eta_sorted["created_at"], y=eta_rolling,
+            name="Rolling median (10 pts)",
+            mode="lines",
+            line=dict(color=TEAL, width=2.5),
+        ))
 
-            if eta_p90 is not None and n_pts > 5 and 0.30 < eta_p90 < 0.85:
-                eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
+        # Reference lines
+        fig_eta.add_hline(y=eta_p90, line_dash="dot", line_color=TEAL,
+            annotation_text=f"p90 = {eta_p90:.3f}",
+            annotation_position="right", annotation_font_size=11)
+        fig_eta.add_hline(y=0.72, line_dash="dash", line_color=MUTED,
+            annotation_text="LC12 spec 0.72",
+            annotation_position="right", annotation_font_size=10)
 
-                # Headline metric card
-                st.markdown(
-                    f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
-                    f"border-left:3px solid {eta_color};margin:4px 0 12px'>"
-                    f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
-                    f"letter-spacing:.08em;margin-bottom:4px'>Peak optical efficiency η* (p90, correlated)</div>"
-                    f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
-                    f"<span style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}</span>"
-                    f"<span style='font-size:.85rem;color:{MUTED}'>"
-                    f"median {eta_median:.3f} &nbsp;·&nbsp; "
-                    f"p95 {eta_p95:.3f} &nbsp;·&nbsp; "
-                    f"max {eta_max:.3f} &nbsp;·&nbsp; "
-                    f"n={n_pts} samples</span>"
-                    f"</div>"
-                    f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
-                    f"* p90 = 90th percentile — representative peak, filters top 10% noise. "
-                    f"η = P_kW ÷ (DNI_est × {APERTURE} m²). "
-                    f"DNI_est = kt_STRÅNG × GHI_sensor (±10–15%). "
-                    f"LC12 manufacturer spec: η_peak ≈ 0.72."
-                    f"</div></div>",
-                    unsafe_allow_html=True
-                )
+        fig_eta.update_layout(
+            height=280, margin=dict(l=0, r=80, t=10, b=0),
+            yaxis=dict(title="η (–)", range=[0, 0.9],
+                       gridcolor=BORDER, color=MUTED,
+                       tickformat=".2f"),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=10, color=MUTED, family="Inter")),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"))
+        fig_eta.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_eta, use_container_width=True,
+            config={"scrollZoom": True, "displayModeBar": True,
+                    "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+        st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
+                   "Variability reflects cloud transients, tracking jitter, startup, soiling.")
 
-                # Time series chart of η per measurement point
-                fig_eta = go.Figure()
+    elif eta_p90 is not None and not (0.30 < eta_p90 < 0.85):
+        st.warning(f"η (p90) = {eta_p90:.3f} — outside plausible range 0.30–0.85. "
+                   "Likely STRÅNG/sensor timestamp mismatch. Try a clearer period.")
+    else:
+        # Debug info — show why no samples qualified
+        n_total   = len(eta_df) if not eta_df.empty else 0
+        n_day     = len(eta_df[eta_df["ghi_s"] > 400]) if not eta_df.empty else 0
+        n_running = len(eta_df[(eta_df["ghi_s"] > 400) & (eta_df["p_meas"] > 1.0)])                             if not eta_df.empty else 0
+        st.info(f"Optical efficiency: insufficient qualifying samples. "
+                f"Overlap rows: {n_total} · GHI>400: {n_day} · GHI>400 & P>1kW: {n_running}. "
+                f"Select a window with clear sun and system running.")
 
-                # All qualifying points as scatter
-                fig_eta.add_trace(go.Scatter(
-                    x=eta_clear["created_at"], y=eta_clear["eta_raw"],
-                    name="η per sample",
-                    mode="markers",
-                    marker=dict(color=SLATE, size=4, opacity=0.5),
-                ))
-
-                # Rolling median (window=10 points) as smoothed line
-                eta_sorted = eta_clear.sort_values("created_at")
-                eta_rolling = eta_sorted["eta_raw"].rolling(10, min_periods=3, center=True).median()
-                fig_eta.add_trace(go.Scatter(
-                    x=eta_sorted["created_at"], y=eta_rolling,
-                    name="Rolling median (10 pts)",
-                    mode="lines",
-                    line=dict(color=TEAL, width=2.5),
-                ))
-
-                # Reference lines
-                fig_eta.add_hline(y=eta_p90, line_dash="dot", line_color=TEAL,
-                    annotation_text=f"p90 = {eta_p90:.3f}",
-                    annotation_position="right", annotation_font_size=11)
-                fig_eta.add_hline(y=0.72, line_dash="dash", line_color=MUTED,
-                    annotation_text="LC12 spec 0.72",
-                    annotation_position="right", annotation_font_size=10)
-
-                fig_eta.update_layout(
-                    height=280, margin=dict(l=0, r=80, t=10, b=0),
-                    yaxis=dict(title="η (–)", range=[0, 0.9],
-                               gridcolor=BORDER, color=MUTED,
-                               tickformat=".2f"),
-                    hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                font=dict(size=10, color=MUTED, family="Inter")),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=MUTED, family="Inter"))
-                fig_eta.update_xaxes(showgrid=False, color=MUTED)
-                st.plotly_chart(fig_eta, use_container_width=True,
-                    config={"scrollZoom": True, "displayModeBar": True,
-                            "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
-                st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
-                           "Variability reflects cloud transients, tracking jitter, startup, soiling.")
-
-            elif eta_p90 is not None and not (0.30 < eta_p90 < 0.85):
-                st.warning(f"η (p90) = {eta_p90:.3f} — outside plausible range 0.30–0.85. "
-                           "Likely STRÅNG/sensor timestamp mismatch. Try a clearer period.")
-            else:
-                # Debug info — show why no samples qualified
-                n_total   = len(eta_df) if not eta_df.empty else 0
-                n_day     = len(eta_df[eta_df["ghi_s"] > 400]) if not eta_df.empty else 0
-                n_running = len(eta_df[(eta_df["ghi_s"] > 400) & (eta_df["p_meas"] > 1.0)])                             if not eta_df.empty else 0
-                st.info(f"Optical efficiency: insufficient qualifying samples. "
-                        f"Overlap rows: {n_total} · GHI>400: {n_day} · GHI>400 & P>1kW: {n_running}. "
-                        f"Select a window with clear sun and system running.")
-
-            if efficiency_pct is not None:
-                eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
-                st.markdown(
-                    f"<div style='margin:8px 0 4px;font-size:.9rem;color:{TEXT}'>"
-                    f"Instantaneous system performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
-                    f"of theoretical maximum"
-                    f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
-                    f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
+    if efficiency_pct is not None:
+        eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
+        st.markdown(
+            f"<div style='margin:8px 0 4px;font-size:.9rem;color:{TEXT}'>"
+            f"Instantaneous system performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
+            f"of theoretical maximum"
+            f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
+            f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
 
     # ── Graf: GHI sensor vs STRÅNG GHI + DNI ──────────────────
     st.markdown('<div class="section-title">GHI sensor vs STRÅNG model (GHI & DNI)</div>',
