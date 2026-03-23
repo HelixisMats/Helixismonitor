@@ -513,9 +513,45 @@ lang = st.sidebar.radio("Language / Språk", ["English", "Svenska"],
 lang = "en" if lang == "English" else "sv"
 T = LANG[lang]
 
-tab_live, tab_hist, tab_smhi, tab_om = st.tabs([
-    f"🔴 {T['live']}", f"📈 {T['history']}", f"🌤 {T['smhi']}", f"ℹ️ {T['about']}"
-])
+# ── Access control ────────────────────────────────────────────
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+with st.sidebar:
+    st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:8px 0'>",
+                unsafe_allow_html=True)
+    if st.session_state.authenticated:
+        st.markdown(f"<div style='font-size:.75rem;color:{TEAL};margin-bottom:6px'>"
+                    f"✓ Internal access</div>", unsafe_allow_html=True)
+        if st.button("Log out", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
+    else:
+        with st.expander("🔒 Internal login"):
+            pwd = st.text_input("Password", type="password", label_visibility="collapsed",
+                                placeholder="Enter internal password…")
+            if st.button("Login", use_container_width=True):
+                if pwd == st.secrets.get("ADMIN_PASSWORD", ""):
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password")
+
+is_internal = st.session_state.authenticated
+
+_tab_labels = [f"🔴 {T['live']}", f"📈 {T['history']}", f"ℹ️ {T['about']}"]
+if is_internal:
+    _tab_labels.insert(2, f"🌤 {T['smhi']}")
+
+_tabs = st.tabs(_tab_labels)
+tab_live = _tabs[0]
+tab_hist = _tabs[1]
+if is_internal:
+    tab_smhi = _tabs[2]
+    tab_om   = _tabs[3]
+else:
+    tab_smhi = None
+    tab_om   = _tabs[2]
 
 # ════════════════════════════════════════════════════════════════
 # LIVE TAB
@@ -1016,444 +1052,445 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                 f"helixis_{hours}h.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
-# SMHI & ANALYS TAB
+# SMHI & ANALYS TAB  (internal only)
 # ════════════════════════════════════════════════════════════════
-with tab_smhi:
+if is_internal and tab_smhi is not None:
+     with tab_smhi:
 
-    # ── Förklaringstext ───────────────────────────────────────
-    with st.expander("ℹ️ Understanding STRÅNG model data — what each parameter means", expanded=False):
-        st.markdown(f"""
-#### What is STRÅNG?
+        # ── Förklaringstext ───────────────────────────────────────
+        with st.expander("ℹ️ Understanding STRÅNG model data — what each parameter means", expanded=False):
+            st.markdown(f"""
+    #### What is STRÅNG?
 
-STRÅNG is SMHI's gridded solar radiation model. Unlike weather stations (which only exist
-at fixed points), STRÅNG calculates radiation values for **any coordinate in the Nordic countries**
-using atmospheric physics and satellite cloud data. Resolution: 2.5 × 2.5 km, hourly.
+    STRÅNG is SMHI's gridded solar radiation model. Unlike weather stations (which only exist
+    at fixed points), STRÅNG calculates radiation values for **any coordinate in the Nordic countries**
+    using atmospheric physics and satellite cloud data. Resolution: 2.5 × 2.5 km, hourly.
 
-No API key needed. Data is freely available from SMHI Open Data.
+    No API key needed. Data is freely available from SMHI Open Data.
 
----
+    ---
 
-#### The three radiation parameters
+    #### The three radiation parameters
 
-| Parameter | Full name | What it measures | Sensor type |
-|---|---|---|---|
-| **GHI** | Global Horizontal Irradiance | Total solar energy hitting a flat horizontal surface — direct + diffuse | Pyranometer (flat plate) |
-| **DNI** | Direct Normal Irradiance | Solar energy arriving in a straight line from the sun, measured perpendicular to the sun's rays | Pyrheliometer (tracks sun) |
-| **DHI** | Diffuse Horizontal Irradiance | Scattered light only (clouds, atmosphere) — GHI minus the direct component | Calculated |
+    | Parameter | Full name | What it measures | Sensor type |
+    |---|---|---|---|
+    | **GHI** | Global Horizontal Irradiance | Total solar energy hitting a flat horizontal surface — direct + diffuse | Pyranometer (flat plate) |
+    | **DNI** | Direct Normal Irradiance | Solar energy arriving in a straight line from the sun, measured perpendicular to the sun's rays | Pyrheliometer (tracks sun) |
+    | **DHI** | Diffuse Horizontal Irradiance | Scattered light only (clouds, atmosphere) — GHI minus the direct component | Calculated |
 
-**Why DNI matters for Helixis:** The LC12 concentrates sunlight using mirrors. Diffuse light
-(scattered by clouds) arrives from all directions and cannot be focused. Only DNI contributes
-to useful output. On a heavily overcast day, GHI may be 200 W/m² but DNI is near zero — the
-system produces almost nothing despite "some" sunlight.
+    **Why DNI matters for Helixis:** The LC12 concentrates sunlight using mirrors. Diffuse light
+    (scattered by clouds) arrives from all directions and cannot be focused. Only DNI contributes
+    to useful output. On a heavily overcast day, GHI may be 200 W/m² but DNI is near zero — the
+    system produces almost nothing despite "some" sunlight.
 
----
+    ---
 
-#### Clearness index kt
+    #### Clearness index kt
 
-`kt = DNI_STRÅNG / GHI_STRÅNG`
+    `kt = DNI_STRÅNG / GHI_STRÅNG`
 
-A dimensionless ratio from 0 to ~0.9 describing sky clarity:
+    A dimensionless ratio from 0 to ~0.9 describing sky clarity:
 
-| kt value | Sky condition | Helixis output |
-|---|---|---|
-| 0.75 – 0.90 | Clear sky, direct sun | Full output possible |
-| 0.50 – 0.75 | Mostly clear, thin haze | Reduced ~10–30% |
-| 0.25 – 0.50 | Partly cloudy | Significantly reduced |
-| 0.00 – 0.25 | Overcast | Near-zero output |
+    | kt value | Sky condition | Helixis output |
+    |---|---|---|
+    | 0.75 – 0.90 | Clear sky, direct sun | Full output possible |
+    | 0.50 – 0.75 | Mostly clear, thin haze | Reduced ~10–30% |
+    | 0.25 – 0.50 | Partly cloudy | Significantly reduced |
+    | 0.00 – 0.25 | Overcast | Near-zero output |
 
-**Note on kt > 1.0:** This is physically valid at low solar elevation angles. Because GHI is
-measured on a horizontal surface while DNI is measured perpendicular to the sun:
+    **Note on kt > 1.0:** This is physically valid at low solar elevation angles. Because GHI is
+    measured on a horizontal surface while DNI is measured perpendicular to the sun:
 
-`GHI = DNI × cos(zenith angle) + diffuse`
+    `GHI = DNI × cos(zenith angle) + diffuse`
 
-When the sun is low in the sky, DNI can exceed GHI, giving kt > 1.0 from STRÅNG.
-The app does not clip kt — the on-site sensor (IMT Si-RS485TC, rated 0–1500 W/m², ±1.6%) is
-trusted directly. Values above 1000 W/m² are fully possible on clear days in Sweden.
+    When the sun is low in the sky, DNI can exceed GHI, giving kt > 1.0 from STRÅNG.
+    The app does not clip kt — the on-site sensor (IMT Si-RS485TC, rated 0–1500 W/m², ±1.6%) is
+    trusted directly. Values above 1000 W/m² are fully possible on clear days in Sweden.
 
----
+    ---
 
-#### How we estimate DNI without a pyrheliometer
+    #### How we estimate DNI without a pyrheliometer
 
-Since DNI sensors cost 30,000–100,000 SEK and require daily maintenance, we use:
+    Since DNI sensors cost 30,000–100,000 SEK and require daily maintenance, we use:
 
-`DNI_estimated = kt_STRÅNG × GHI_sensor`
+    `DNI_estimated = kt_STRÅNG × GHI_sensor`
 
-This uses STRÅNG's sky-clarity ratio applied to our own on-site measurement.
-Accuracy is typically ±10–15% on clear days, worse on partially cloudy days
-(when cloud patterns between Örkelljunga and the STRÅNG grid cell differ).
+    This uses STRÅNG's sky-clarity ratio applied to our own on-site measurement.
+    Accuracy is typically ±10–15% on clear days, worse on partially cloudy days
+    (when cloud patterns between Örkelljunga and the STRÅNG grid cell differ).
 
----
+    ---
 
-#### Theoretical vs actual power
+    #### Theoretical vs actual power
 
-`P_theoretical = DNI_estimated × 12.35 m² × 0.65 = DNI × 8.03 W per W/m²`
+    `P_theoretical = DNI_estimated × 12.35 m² × 0.65 = DNI × 8.03 W per W/m²`
 
-The 0.65 factor is the optical efficiency (peak ~0.72, realistic with tracking error and
-mirror soiling ~0.65). The gap between theoretical and actual power reveals system losses:
-mirror soiling, tracking error, pump issues, heat exchanger efficiency, and startup losses.
+    The 0.65 factor is the optical efficiency (peak ~0.72, realistic with tracking error and
+    mirror soiling ~0.65). The gap between theoretical and actual power reveals system losses:
+    mirror soiling, tracking error, pump issues, heat exchanger efficiency, and startup losses.
 
----
-*Sources: SMHI STRÅNG Open Data · Helsingborg station 62040 (temp/wind/humidity) · Växjö station 64565 (GHI station)*
-""")
+    ---
+    *Sources: SMHI STRÅNG Open Data · Helsingborg station 62040 (temp/wind/humidity) · Växjö station 64565 (GHI station)*
+    """)
 
-    # ── Hämta data ────────────────────────────────────────────
-    h_cmp = st.selectbox(T["analysis_period"],
-                          [6, 12, 24, 36, 48, 72, 96, 120, 168, 240, 336],
-                          index=4,
-                          format_func=lambda h: (f"{h}h" if h < 24 else
-                              f"{h//24}d" + (f" {h%24}h" if h%24 else "")),
-                          key="smhi_h")
+        # ── Hämta data ────────────────────────────────────────────
+        h_cmp = st.selectbox(T["analysis_period"],
+                              [6, 12, 24, 36, 48, 72, 96, 120, 168, 240, 336],
+                              index=4,
+                              format_func=lambda h: (f"{h}h" if h < 24 else
+                                  f"{h//24}d" + (f" {h%24}h" if h%24 else "")),
+                              key="smhi_h")
 
-    col_l, col_r = st.columns(2)
-    with col_l:
-        with st.spinner(T["loading_smhi"]):
-            smhi_data, smhi_errors = fetch_smhi_and_store()
-    with col_r:
-        with st.spinner(T["loading_strang"]):
-            days_back = max(1, h_cmp // 24 + 1)
-            df_strang, strang_errors = fetch_strang(days_back)
+        col_l, col_r = st.columns(2)
+        with col_l:
+            with st.spinner(T["loading_smhi"]):
+                smhi_data, smhi_errors = fetch_smhi_and_store()
+        with col_r:
+            with st.spinner(T["loading_strang"]):
+                days_back = max(1, h_cmp // 24 + 1)
+                df_strang, strang_errors = fetch_strang(days_back)
 
-    if smhi_errors:
-        with st.expander(f"⚠️ {len(smhi_errors)} SMHI-stationskälla(or) saknas"):
-            for key, msg in smhi_errors.items():
-                st.warning(f"**{key}**: {msg}")
+        if smhi_errors:
+            with st.expander(f"⚠️ {len(smhi_errors)} SMHI-stationskälla(or) saknas"):
+                for key, msg in smhi_errors.items():
+                    st.warning(f"**{key}**: {msg}")
 
-    if strang_errors:
-        with st.expander(f"⚠️ STRÅNG model: {len(strang_errors)} parameter(s) failed", expanded=True):
-            for k, msg in strang_errors.items():
-                st.warning(f"**{k}**: {msg}")
-            st.caption(f"New URL: opendata-download-metanalys.smhi.se/api/category/strang1g/version/1"
-                       f"/geotype/point/lon/{SITE_LON}/lat/{SITE_LAT}/parameter/118/data.json?from=YYYYMMDDhh&to=YYYYMMDDhh&interval=hourly")
-    elif not df_strang.empty:
-        sensors_loaded = df_strang["sensor"].unique().tolist()
-        last_ts = df_strang["created_at"].max().astimezone(SWE).strftime("%H:%M")
-        st.success(f"✓ STRÅNG: {len(df_strang)} rows · {', '.join(sensors_loaded)} · latest: {last_ts}")
+        if strang_errors:
+            with st.expander(f"⚠️ STRÅNG model: {len(strang_errors)} parameter(s) failed", expanded=True):
+                for k, msg in strang_errors.items():
+                    st.warning(f"**{k}**: {msg}")
+                st.caption(f"New URL: opendata-download-metanalys.smhi.se/api/category/strang1g/version/1"
+                           f"/geotype/point/lon/{SITE_LON}/lat/{SITE_LAT}/parameter/118/data.json?from=YYYYMMDDhh&to=YYYYMMDDhh&interval=hourly")
+        elif not df_strang.empty:
+            sensors_loaded = df_strang["sensor"].unique().tolist()
+            last_ts = df_strang["created_at"].max().astimezone(SWE).strftime("%H:%M")
+            st.success(f"✓ STRÅNG: {len(df_strang)} rows · {', '.join(sensors_loaded)} · latest: {last_ts}")
 
-    # ── Väder just nu ─────────────────────────────────────────
-    st.markdown('<div class="section-title">Weather conditions (SMHI stations)</div>',
-                unsafe_allow_html=True)
-    smhi_defs = {
-        "temperature": ("Air temp",    "°C",  -20, 40,   SLATE, 1),
-        "wind_speed":  ("Wind speed",  "m/s",   0, 25,   SLATE, 1),
-        "irradiance":  ("GHI (Växjö)", "W/m²",  0, 1500, AMBER, 0),
-        "humidity":    ("Humidity",    "%",      0, 100,  SLATE, 0),
-    }
-    tile_specs = []
-    for key, (label, unit, mn, mx, color, dec) in smhi_defs.items():
-        df_s = smhi_data.get(key)
-        val  = float(df_s["value"].iloc[-1]) if isinstance(df_s, pd.DataFrame) and not df_s.empty else None
-        tile_specs.append((label, val, unit, mn, mx, color, dec, None))
-    render_tiles(tile_specs)
+        # ── Väder just nu ─────────────────────────────────────────
+        st.markdown('<div class="section-title">Weather conditions (SMHI stations)</div>',
+                    unsafe_allow_html=True)
+        smhi_defs = {
+            "temperature": ("Air temp",    "°C",  -20, 40,   SLATE, 1),
+            "wind_speed":  ("Wind speed",  "m/s",   0, 25,   SLATE, 1),
+            "irradiance":  ("GHI (Växjö)", "W/m²",  0, 1500, AMBER, 0),
+            "humidity":    ("Humidity",    "%",      0, 100,  SLATE, 0),
+        }
+        tile_specs = []
+        for key, (label, unit, mn, mx, color, dec) in smhi_defs.items():
+            df_s = smhi_data.get(key)
+            val  = float(df_s["value"].iloc[-1]) if isinstance(df_s, pd.DataFrame) and not df_s.empty else None
+            tile_specs.append((label, val, unit, mn, mx, color, dec, None))
+        render_tiles(tile_specs)
 
-    # ── STRÅNG — DNI & kt-faktor ──────────────────────────────
-    st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
-                unsafe_allow_html=True)
+        # ── STRÅNG — DNI & kt-faktor ──────────────────────────────
+        st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
+                    unsafe_allow_html=True)
 
-    df_cmp = fetch_history(h_cmp)
+        df_cmp = fetch_history(h_cmp)
 
-    # All variables initialized — safe even if STRÅNG/sensor data is missing
-    APERTURE = 12.35
-    kt_current = None; dni_est_current = None; p_theoretical = None
-    ETA_OPT = 0.65; merged = pd.DataFrame()
-    eta_clear = pd.DataFrame(); eta_df = pd.DataFrame()
-    eta_median = eta_p90 = eta_p95 = eta_max = None; n_pts = 0
-    irr_live = df_cmp[df_cmp["sensor"]=="irradiance"].sort_values("created_at")
-    pwr_live = df_cmp[df_cmp["sensor"]=="power"].sort_values("created_at")
-    p_actual = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
+        # All variables initialized — safe even if STRÅNG/sensor data is missing
+        APERTURE = 12.35
+        kt_current = None; dni_est_current = None; p_theoretical = None
+        ETA_OPT = 0.65; merged = pd.DataFrame()
+        eta_clear = pd.DataFrame(); eta_df = pd.DataFrame()
+        eta_median = eta_p90 = eta_p95 = eta_max = None; n_pts = 0
+        irr_live = df_cmp[df_cmp["sensor"]=="irradiance"].sort_values("created_at")
+        pwr_live = df_cmp[df_cmp["sensor"]=="power"].sort_values("created_at")
+        p_actual = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
 
-    # Clip STRÅNG to actual sensor window
-    df_st = pd.DataFrame()
-    if not df_strang.empty and not irr_live.empty:
-        s_t0 = irr_live["created_at"].min()
-        s_t1 = irr_live["created_at"].max()
-        df_st = df_strang[
-            (df_strang["created_at"] >= s_t0) &
-            (df_strang["created_at"] <= s_t1)
-        ].copy()
+        # Clip STRÅNG to actual sensor window
+        df_st = pd.DataFrame()
+        if not df_strang.empty and not irr_live.empty:
+            s_t0 = irr_live["created_at"].min()
+            s_t1 = irr_live["created_at"].max()
+            df_st = df_strang[
+                (df_strang["created_at"] >= s_t0) &
+                (df_strang["created_at"] <= s_t1)
+            ].copy()
 
-    # Use STRÅNG DNI directly — skip kt=DNI/GHI which breaks when GHI_STRÅNG≈0
-    dni_strang_df = pd.DataFrame()
-    if not df_st.empty:
-        dni_rows = df_st[df_st["sensor"]=="dni_strang"][["created_at","value"]].copy()
-        dni_rows = dni_rows.rename(columns={"value":"dni_strang"})
-        dni_strang_df = dni_rows[dni_rows["dni_strang"] > 10].sort_values("created_at")
+        # Use STRÅNG DNI directly — skip kt=DNI/GHI which breaks when GHI_STRÅNG≈0
+        dni_strang_df = pd.DataFrame()
+        if not df_st.empty:
+            dni_rows = df_st[df_st["sensor"]=="dni_strang"][["created_at","value"]].copy()
+            dni_rows = dni_rows.rename(columns={"value":"dni_strang"})
+            dni_strang_df = dni_rows[dni_rows["dni_strang"] > 10].sort_values("created_at")
 
-    if not dni_strang_df.empty and not irr_live.empty:
-        last_ts    = irr_live["created_at"].iloc[-1]
-        ghi_last   = float(irr_live["value"].iloc[-1])
-        time_diffs = (dni_strang_df["created_at"] - last_ts).abs()
-        best_mask  = time_diffs <= pd.Timedelta("3h")
-        if best_mask.any():
-            best_idx        = time_diffs[best_mask].idxmin()
-            dni_est_current = float(dni_strang_df.loc[best_idx, "dni_strang"])
-            kt_current      = (dni_est_current / ghi_last) if ghi_last > 20 else None
+        if not dni_strang_df.empty and not irr_live.empty:
+            last_ts    = irr_live["created_at"].iloc[-1]
+            ghi_last   = float(irr_live["value"].iloc[-1])
+            time_diffs = (dni_strang_df["created_at"] - last_ts).abs()
+            best_mask  = time_diffs <= pd.Timedelta("3h")
+            if best_mask.any():
+                best_idx        = time_diffs[best_mask].idxmin()
+                dni_est_current = float(dni_strang_df.loc[best_idx, "dni_strang"])
+                kt_current      = (dni_est_current / ghi_last) if ghi_last > 20 else None
 
-        pwr_df = pwr_live[["created_at","value"]].rename(columns={"value":"p_meas"})
-        if not pwr_df.empty:
-            eta_df = pd.merge_asof(
-                pwr_df.sort_values("created_at"),
-                dni_strang_df.sort_values("created_at"),
-                on="created_at", tolerance=pd.Timedelta("65min"),
-                direction="nearest")
-            eta_df = eta_df.dropna(subset=["p_meas","dni_strang"])
-            if not eta_df.empty:
-                denom = (eta_df["dni_strang"] * APERTURE / 1000).replace(0, float("nan"))
-                eta_df["eta_raw"] = eta_df["p_meas"] / denom
-                eta_df["ghi_s"]   = eta_df["dni_strang"]
-                eta_clear = eta_df[
-                    (eta_df["dni_strang"] > 300) &
-                    (eta_df["p_meas"]     > 1.0) &
-                    (eta_df["eta_raw"]    >= 0.10) &
-                    (eta_df["eta_raw"]    <= 0.90)
-                ].copy()
-    # Compute η statistics from qualifying samples
-    if not eta_clear.empty:
-        eta_median = float(eta_clear["eta_raw"].median())
-        eta_p90    = float(eta_clear["eta_raw"].quantile(0.90))
-        eta_p95    = float(eta_clear["eta_raw"].quantile(0.95))
-        eta_max    = float(eta_clear["eta_raw"].max())
-        n_pts      = len(eta_clear)
-        ETA_OPT    = float(max(0.10, min(0.85, eta_p90)))
-        p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000 \
-            if dni_est_current is not None else None
-    # ── kt tiles ──────────────────────────────────────
-    kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
-    efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
+            pwr_df = pwr_live[["created_at","value"]].rename(columns={"value":"p_meas"})
+            if not pwr_df.empty:
+                eta_df = pd.merge_asof(
+                    pwr_df.sort_values("created_at"),
+                    dni_strang_df.sort_values("created_at"),
+                    on="created_at", tolerance=pd.Timedelta("65min"),
+                    direction="nearest")
+                eta_df = eta_df.dropna(subset=["p_meas","dni_strang"])
+                if not eta_df.empty:
+                    denom = (eta_df["dni_strang"] * APERTURE / 1000).replace(0, float("nan"))
+                    eta_df["eta_raw"] = eta_df["p_meas"] / denom
+                    eta_df["ghi_s"]   = eta_df["dni_strang"]
+                    eta_clear = eta_df[
+                        (eta_df["dni_strang"] > 300) &
+                        (eta_df["p_meas"]     > 1.0) &
+                        (eta_df["eta_raw"]    >= 0.10) &
+                        (eta_df["eta_raw"]    <= 0.90)
+                    ].copy()
+        # Compute η statistics from qualifying samples
+        if not eta_clear.empty:
+            eta_median = float(eta_clear["eta_raw"].median())
+            eta_p90    = float(eta_clear["eta_raw"].quantile(0.90))
+            eta_p95    = float(eta_clear["eta_raw"].quantile(0.95))
+            eta_max    = float(eta_clear["eta_raw"].max())
+            n_pts      = len(eta_clear)
+            ETA_OPT    = float(max(0.10, min(0.85, eta_p90)))
+            p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000 \
+                if dni_est_current is not None else None
+        # ── kt tiles ──────────────────────────────────────
+        kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
+        efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
 
-    render_tiles([
-        ("Clearness index kt",    kt_current,      "",     0, 1.2,  kt_color, 2, None),
-        ("DNI estimated",         dni_est_current, "W/m²", 0, 1500, AMBER,    0, None),
-        ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
-        ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
-    ])
-    # Show what data range was actually used
-    if not df_st.empty and not df_cmp.empty:
-        st_t0 = df_st["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
-        st_t1 = df_st["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
-        s_t0  = df_cmp["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
-        s_t1  = df_cmp["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
-        n_sensor = len(df_cmp[df_cmp["sensor"]=="irradiance"])
-        n_strang = len(df_st)
-        st.caption(f"Data used — sensor: {s_t0} → {s_t1} ({n_sensor} pts) · "
-                   f"STRÅNG: {st_t0} → {st_t1} ({n_strang} pts)")
-    if kt_current is None:
-        st.caption("⚠ kt: no STRÅNG value within ±3h of latest sensor reading. "
-                   "STRÅNG is hourly — analysis uses historical η from the window.")
+        render_tiles([
+            ("Clearness index kt",    kt_current,      "",     0, 1.2,  kt_color, 2, None),
+            ("DNI estimated",         dni_est_current, "W/m²", 0, 1500, AMBER,    0, None),
+            ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
+            ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
+        ])
+        # Show what data range was actually used
+        if not df_st.empty and not df_cmp.empty:
+            st_t0 = df_st["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+            st_t1 = df_st["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+            s_t0  = df_cmp["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+            s_t1  = df_cmp["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+            n_sensor = len(df_cmp[df_cmp["sensor"]=="irradiance"])
+            n_strang = len(df_st)
+            st.caption(f"Data used — sensor: {s_t0} → {s_t1} ({n_sensor} pts) · "
+                       f"STRÅNG: {st_t0} → {st_t1} ({n_strang} pts)")
+        if kt_current is None:
+            st.caption("⚠ kt: no STRÅNG value within ±3h of latest sensor reading. "
+                       "STRÅNG is hourly — analysis uses historical η from the window.")
 
-    # ── Optical efficiency — headline + time series ────
-    st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
-                unsafe_allow_html=True)
+        # ── Optical efficiency — headline + time series ────
+        st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
+                    unsafe_allow_html=True)
 
-    if eta_p90 is not None and n_pts > 5:
-        eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
+        if eta_p90 is not None and n_pts > 5:
+            eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
 
-        # Headline metric card
-        st.markdown(
-            f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
-            f"border-left:3px solid {eta_color};margin:4px 0 12px'>"
-            f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
-            f"letter-spacing:.08em;margin-bottom:4px'>Peak optical efficiency η* (p90, correlated)</div>"
-            f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
-            f"<span style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}</span>"
-            f"<span style='font-size:.85rem;color:{MUTED}'>"
-            f"median {eta_median:.3f} &nbsp;·&nbsp; "
-            f"p95 {eta_p95:.3f} &nbsp;·&nbsp; "
-            f"max {eta_max:.3f} &nbsp;·&nbsp; "
-            f"n={n_pts} samples</span>"
-            f"</div>"
-            f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
-            f"* p90 = 90th percentile — representative peak, filters top 10% noise. "
-            f"η = P_kW ÷ (DNI_est × {APERTURE} m²). "
-            f"DNI_est = kt_STRÅNG × GHI_sensor (±10–15%). "
-            f"LC12 manufacturer spec: η_peak ≈ 0.72."
-            f"</div></div>",
-            unsafe_allow_html=True
-        )
+            # Headline metric card
+            st.markdown(
+                f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
+                f"border-left:3px solid {eta_color};margin:4px 0 12px'>"
+                f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
+                f"letter-spacing:.08em;margin-bottom:4px'>Peak optical efficiency η* (p90, correlated)</div>"
+                f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
+                f"<span style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}</span>"
+                f"<span style='font-size:.85rem;color:{MUTED}'>"
+                f"median {eta_median:.3f} &nbsp;·&nbsp; "
+                f"p95 {eta_p95:.3f} &nbsp;·&nbsp; "
+                f"max {eta_max:.3f} &nbsp;·&nbsp; "
+                f"n={n_pts} samples</span>"
+                f"</div>"
+                f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
+                f"* p90 = 90th percentile — representative peak, filters top 10% noise. "
+                f"η = P_kW ÷ (DNI_est × {APERTURE} m²). "
+                f"DNI_est = kt_STRÅNG × GHI_sensor (±10–15%). "
+                f"LC12 manufacturer spec: η_peak ≈ 0.72."
+                f"</div></div>",
+                unsafe_allow_html=True
+            )
 
-        # Time series chart of η per measurement point
-        fig_eta = go.Figure()
+            # Time series chart of η per measurement point
+            fig_eta = go.Figure()
 
-        # All qualifying points as scatter
-        fig_eta.add_trace(go.Scatter(
-            x=eta_clear["created_at"], y=eta_clear["eta_raw"],
-            name="η per sample",
-            mode="markers",
-            marker=dict(color=SLATE, size=4, opacity=0.5),
-        ))
+            # All qualifying points as scatter
+            fig_eta.add_trace(go.Scatter(
+                x=eta_clear["created_at"], y=eta_clear["eta_raw"],
+                name="η per sample",
+                mode="markers",
+                marker=dict(color=SLATE, size=4, opacity=0.5),
+            ))
 
-        # Rolling median (window=10 points) as smoothed line
-        eta_sorted = eta_clear.sort_values("created_at")
-        eta_rolling = eta_sorted["eta_raw"].rolling(10, min_periods=3, center=True).median()
-        fig_eta.add_trace(go.Scatter(
-            x=eta_sorted["created_at"], y=eta_rolling,
-            name="Rolling median (10 pts)",
-            mode="lines",
-            line=dict(color=TEAL, width=2.5),
-        ))
+            # Rolling median (window=10 points) as smoothed line
+            eta_sorted = eta_clear.sort_values("created_at")
+            eta_rolling = eta_sorted["eta_raw"].rolling(10, min_periods=3, center=True).median()
+            fig_eta.add_trace(go.Scatter(
+                x=eta_sorted["created_at"], y=eta_rolling,
+                name="Rolling median (10 pts)",
+                mode="lines",
+                line=dict(color=TEAL, width=2.5),
+            ))
 
-        # Reference lines
-        fig_eta.add_hline(y=eta_p90, line_dash="dot", line_color=TEAL,
-            annotation_text=f"p90 = {eta_p90:.3f}",
-            annotation_position="right", annotation_font_size=11)
-        fig_eta.add_hline(y=0.72, line_dash="dash", line_color=MUTED,
-            annotation_text="LC12 spec 0.72",
-            annotation_position="right", annotation_font_size=10)
+            # Reference lines
+            fig_eta.add_hline(y=eta_p90, line_dash="dot", line_color=TEAL,
+                annotation_text=f"p90 = {eta_p90:.3f}",
+                annotation_position="right", annotation_font_size=11)
+            fig_eta.add_hline(y=0.72, line_dash="dash", line_color=MUTED,
+                annotation_text="LC12 spec 0.72",
+                annotation_position="right", annotation_font_size=10)
 
-        fig_eta.update_layout(
-            height=280, margin=dict(l=0, r=80, t=10, b=0),
-            yaxis=dict(title="η (–)", range=[0, 0.9],
-                       gridcolor=BORDER, color=MUTED,
-                       tickformat=".2f"),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        font=dict(size=10, color=MUTED, family="Inter")),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=MUTED, family="Inter"))
-        fig_eta.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_eta, use_container_width=True,
-            config={"scrollZoom": True, "displayModeBar": True,
-                    "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
-        st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
-                   "Variability reflects cloud transients, tracking jitter, startup, soiling.")
-
-    else:
-        # Debug info — show why no samples qualified
-        n_total   = len(eta_df) if not eta_df.empty else 0
-        n_day     = len(eta_df[eta_df["ghi_s"] > 400]) if not eta_df.empty else 0
-        n_running = len(eta_df[(eta_df["ghi_s"] > 400) & (eta_df["p_meas"] > 1.0)])                             if not eta_df.empty else 0
-        st.info(f"Optical efficiency: insufficient qualifying samples. "
-                f"Overlap rows: {n_total} · GHI>400: {n_day} · GHI>400 & P>1kW: {n_running}. "
-                f"Select a window with clear sun and system running.")
-
-    if efficiency_pct is not None:
-        eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
-        st.markdown(
-            f"<div style='margin:8px 0 4px;font-size:.9rem;color:{TEXT}'>"
-            f"Instantaneous system performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
-            f"of theoretical maximum"
-            f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
-            f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-    # ── Graf: GHI sensor vs STRÅNG GHI + DNI ──────────────────
-    # ── Single combined chart: GHI sensor + DNI STRÅNG + Power + η ──
-    st.markdown('<div class="section-title">Irradiance, power & optical efficiency — combined view</div>',
-                unsafe_allow_html=True)
-    st.caption("Only periods with GHI > 100 W/m² or Power > 0.5 kW shown. "
-               "DNI from STRÅNG model (hourly). η = P / (DNI × 12.35 m²).")
-
-    # Build combined dataframe: sensor irradiance + power + STRÅNG DNI
-    irr_all = df_cmp[df_cmp["sensor"]=="irradiance"][["created_at","value"]].rename(columns={"value":"ghi"})
-    pwr_all = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"power"})
-
-    if not irr_all.empty and not pwr_all.empty:
-        combo = pd.merge_asof(irr_all.sort_values("created_at"),
-                              pwr_all.sort_values("created_at"),
-                              on="created_at", tolerance=pd.Timedelta("5min"))
-        if not dni_strang_df.empty:
-            combo = pd.merge_asof(combo.sort_values("created_at"),
-                                  dni_strang_df.sort_values("created_at"),
-                                  on="created_at", tolerance=pd.Timedelta("65min"),
-                                  direction="nearest")
-        else:
-            combo["dni_strang"] = None
-
-        # Filter: only show where sun is up or system running
-        mask = (combo["ghi"] > 100) | (combo["power"] > 0.5)
-        combo = combo[mask].copy()
-
-        # Compute η per point where DNI available and meaningful
-        if "dni_strang" in combo.columns:
-            denom = (combo["dni_strang"] * 12.35 / 1000).replace(0, float("nan"))
-            combo["eta_pt"] = (combo["power"] / denom).where(
-                (combo["dni_strang"] > 200) & (combo["power"] > 0.5))
-            combo.loc[combo["eta_pt"] > 0.95, "eta_pt"] = float("nan")  # clip outliers
-
-        if not combo.empty:
-            fig_combo = go.Figure()
-
-            # Left axis: irradiance W/m²
-            fig_combo.add_trace(go.Scatter(
-                x=combo["created_at"], y=combo["ghi"],
-                name="GHI sensor (W/m²)", mode="lines",
-                line=dict(color=AMBER, width=2), yaxis="y"))
-
-            if "dni_strang" in combo.columns:
-                fig_combo.add_trace(go.Scatter(
-                    x=combo["created_at"], y=combo["dni_strang"],
-                    name="DNI STRÅNG (W/m²)", mode="lines",
-                    line=dict(color=RUST, width=1.5, dash="dash"), yaxis="y"))
-
-            # Right axis: power kW
-            fig_combo.add_trace(go.Scatter(
-                x=combo["created_at"], y=combo["power"],
-                name="Thermal power (kW)", mode="lines",
-                line=dict(color=TEAL, width=2.5), yaxis="y2"))
-
-            # Right axis: η (0–1) — also on y2 scaled 0–10 to align with kW
-            if "eta_pt" in combo.columns:
-                fig_combo.add_trace(go.Scatter(
-                    x=combo["created_at"],
-                    y=combo["eta_pt"] * 10,  # scale: η×10 so 0.65 → 6.5 kW-equiv
-                    name="η × 10 (right axis)", mode="markers",
-                    marker=dict(color=BLUE, size=3, opacity=0.6), yaxis="y2"))
-
-            _eta_disp = f"η_p90 = {eta_p90:.3f}" if eta_p90 else "η not yet computed"
-            fig_combo.update_layout(
-                height=380, margin=dict(l=0, r=60, t=10, b=0),
+            fig_eta.update_layout(
+                height=280, margin=dict(l=0, r=80, t=10, b=0),
+                yaxis=dict(title="η (–)", range=[0, 0.9],
+                           gridcolor=BORDER, color=MUTED,
+                           tickformat=".2f"),
                 hovermode="x unified",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
                             font=dict(size=10, color=MUTED, family="Inter")),
-                yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
-                           tickfont=dict(color=AMBER), gridcolor=BORDER, rangemode="tozero"),
-                yaxis2=dict(title=dict(text="kW  |  η×10", font=dict(color=TEAL)),
-                            tickfont=dict(color=TEAL), overlaying="y", side="right",
-                            showgrid=False, rangemode="tozero"),
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"),
-                annotations=[dict(
-                    text=_eta_disp, x=1, y=1.08, xref="paper", yref="paper",
-                    showarrow=False, font=dict(size=11, color=TEAL)
-                )]
-            )
-            fig_combo.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_combo, use_container_width=True,
-                config={"scrollZoom":True,"displayModeBar":True,
-                        "modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
-            st.caption("η×10 plotted on power axis so 0.65 → 6.5 on right scale. "
-                       "Gap between DNI-based theoretical and actual power = system losses.")
+                font=dict(color=MUTED, family="Inter"))
+            fig_eta.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_eta, use_container_width=True,
+                config={"scrollZoom": True, "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+            st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
+                       "Variability reflects cloud transients, tracking jitter, startup, soiling.")
 
-    # ── kt-tidsserie ──────────────────────────────────────────
-    if not df_st.empty and not dni_strang_df.empty:
-        st.markdown('<div class="section-title">Clearness index kt over time</div>',
+        else:
+            # Debug info — show why no samples qualified
+            n_total   = len(eta_df) if not eta_df.empty else 0
+            n_day     = len(eta_df[eta_df["ghi_s"] > 400]) if not eta_df.empty else 0
+            n_running = len(eta_df[(eta_df["ghi_s"] > 400) & (eta_df["p_meas"] > 1.0)])                             if not eta_df.empty else 0
+            st.info(f"Optical efficiency: insufficient qualifying samples. "
+                    f"Overlap rows: {n_total} · GHI>400: {n_day} · GHI>400 & P>1kW: {n_running}. "
+                    f"Select a window with clear sun and system running.")
+
+        if efficiency_pct is not None:
+            eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
+            st.markdown(
+                f"<div style='margin:8px 0 4px;font-size:.9rem;color:{TEXT}'>"
+                f"Instantaneous system performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
+                f"of theoretical maximum"
+                f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
+                f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        # ── Graf: GHI sensor vs STRÅNG GHI + DNI ──────────────────
+        # ── Single combined chart: GHI sensor + DNI STRÅNG + Power + η ──
+        st.markdown('<div class="section-title">Irradiance, power & optical efficiency — combined view</div>',
                     unsafe_allow_html=True)
-        # Compute kt = DNI_STRÅNG / GHI_sensor at matched timestamps
-        kt_combo = pd.merge_asof(
-            irr_all[irr_all["ghi"] > 50].sort_values("created_at"),
-            dni_strang_df.sort_values("created_at"),
-            on="created_at", tolerance=pd.Timedelta("65min"), direction="nearest")
-        kt_combo = kt_combo.dropna()
-        kt_combo["kt"] = (kt_combo["dni_strang"] / kt_combo["ghi"]).clip(0, 2)
-        fig_kt = go.Figure()
-        fig_kt.add_trace(go.Scatter(
-            x=kt_combo["created_at"], y=kt_combo["kt"],
-            name="kt = DNI_STRÅNG / GHI_sensor", mode="lines",
-            line=dict(color=TEAL, width=2),
-            fill="tozeroy", fillcolor="rgba(22,122,94,0.1)"))
-        fig_kt.add_hline(y=0.7, line_dash="dot", line_color=AMBER,
-                         annotation_text="Clear sky (kt=0.7)")
-        fig_kt.update_layout(
-            height=200, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(title="kt", range=[0, 1.5], gridcolor=BORDER, color=MUTED),
-            hovermode="x unified",
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=MUTED, family="Inter"))
-        fig_kt.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_kt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
-        st.caption("kt > 0.7 = clear sky, direct sunlight optimal for concentrating systems. "
-                   "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
+        st.caption("Only periods with GHI > 100 W/m² or Power > 0.5 kW shown. "
+                   "DNI from STRÅNG model (hourly). η = P / (DNI × 12.35 m²).")
+
+        # Build combined dataframe: sensor irradiance + power + STRÅNG DNI
+        irr_all = df_cmp[df_cmp["sensor"]=="irradiance"][["created_at","value"]].rename(columns={"value":"ghi"})
+        pwr_all = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"power"})
+
+        if not irr_all.empty and not pwr_all.empty:
+            combo = pd.merge_asof(irr_all.sort_values("created_at"),
+                                  pwr_all.sort_values("created_at"),
+                                  on="created_at", tolerance=pd.Timedelta("5min"))
+            if not dni_strang_df.empty:
+                combo = pd.merge_asof(combo.sort_values("created_at"),
+                                      dni_strang_df.sort_values("created_at"),
+                                      on="created_at", tolerance=pd.Timedelta("65min"),
+                                      direction="nearest")
+            else:
+                combo["dni_strang"] = None
+
+            # Filter: only show where sun is up or system running
+            mask = (combo["ghi"] > 100) | (combo["power"] > 0.5)
+            combo = combo[mask].copy()
+
+            # Compute η per point where DNI available and meaningful
+            if "dni_strang" in combo.columns:
+                denom = (combo["dni_strang"] * 12.35 / 1000).replace(0, float("nan"))
+                combo["eta_pt"] = (combo["power"] / denom).where(
+                    (combo["dni_strang"] > 200) & (combo["power"] > 0.5))
+                combo.loc[combo["eta_pt"] > 0.95, "eta_pt"] = float("nan")  # clip outliers
+
+            if not combo.empty:
+                fig_combo = go.Figure()
+
+                # Left axis: irradiance W/m²
+                fig_combo.add_trace(go.Scatter(
+                    x=combo["created_at"], y=combo["ghi"],
+                    name="GHI sensor (W/m²)", mode="lines",
+                    line=dict(color=AMBER, width=2), yaxis="y"))
+
+                if "dni_strang" in combo.columns:
+                    fig_combo.add_trace(go.Scatter(
+                        x=combo["created_at"], y=combo["dni_strang"],
+                        name="DNI STRÅNG (W/m²)", mode="lines",
+                        line=dict(color=RUST, width=1.5, dash="dash"), yaxis="y"))
+
+                # Right axis: power kW
+                fig_combo.add_trace(go.Scatter(
+                    x=combo["created_at"], y=combo["power"],
+                    name="Thermal power (kW)", mode="lines",
+                    line=dict(color=TEAL, width=2.5), yaxis="y2"))
+
+                # Right axis: η (0–1) — also on y2 scaled 0–10 to align with kW
+                if "eta_pt" in combo.columns:
+                    fig_combo.add_trace(go.Scatter(
+                        x=combo["created_at"],
+                        y=combo["eta_pt"] * 10,  # scale: η×10 so 0.65 → 6.5 kW-equiv
+                        name="η × 10 (right axis)", mode="markers",
+                        marker=dict(color=BLUE, size=3, opacity=0.6), yaxis="y2"))
+
+                _eta_disp = f"η_p90 = {eta_p90:.3f}" if eta_p90 else "η not yet computed"
+                fig_combo.update_layout(
+                    height=380, margin=dict(l=0, r=60, t=10, b=0),
+                    hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                               tickfont=dict(color=AMBER), gridcolor=BORDER, rangemode="tozero"),
+                    yaxis2=dict(title=dict(text="kW  |  η×10", font=dict(color=TEAL)),
+                                tickfont=dict(color=TEAL), overlaying="y", side="right",
+                                showgrid=False, rangemode="tozero"),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"),
+                    annotations=[dict(
+                        text=_eta_disp, x=1, y=1.08, xref="paper", yref="paper",
+                        showarrow=False, font=dict(size=11, color=TEAL)
+                    )]
+                )
+                fig_combo.update_xaxes(showgrid=False, color=MUTED)
+                st.plotly_chart(fig_combo, use_container_width=True,
+                    config={"scrollZoom":True,"displayModeBar":True,
+                            "modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                st.caption("η×10 plotted on power axis so 0.65 → 6.5 on right scale. "
+                           "Gap between DNI-based theoretical and actual power = system losses.")
+
+        # ── kt-tidsserie ──────────────────────────────────────────
+        if not df_st.empty and not dni_strang_df.empty:
+            st.markdown('<div class="section-title">Clearness index kt over time</div>',
+                        unsafe_allow_html=True)
+            # Compute kt = DNI_STRÅNG / GHI_sensor at matched timestamps
+            kt_combo = pd.merge_asof(
+                irr_all[irr_all["ghi"] > 50].sort_values("created_at"),
+                dni_strang_df.sort_values("created_at"),
+                on="created_at", tolerance=pd.Timedelta("65min"), direction="nearest")
+            kt_combo = kt_combo.dropna()
+            kt_combo["kt"] = (kt_combo["dni_strang"] / kt_combo["ghi"]).clip(0, 2)
+            fig_kt = go.Figure()
+            fig_kt.add_trace(go.Scatter(
+                x=kt_combo["created_at"], y=kt_combo["kt"],
+                name="kt = DNI_STRÅNG / GHI_sensor", mode="lines",
+                line=dict(color=TEAL, width=2),
+                fill="tozeroy", fillcolor="rgba(22,122,94,0.1)"))
+            fig_kt.add_hline(y=0.7, line_dash="dot", line_color=AMBER,
+                             annotation_text="Clear sky (kt=0.7)")
+            fig_kt.update_layout(
+                height=200, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(title="kt", range=[0, 1.5], gridcolor=BORDER, color=MUTED),
+                hovermode="x unified",
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=MUTED, family="Inter"))
+            fig_kt.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_kt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+            st.caption("kt > 0.7 = clear sky, direct sunlight optimal for concentrating systems. "
+                       "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
 
 # ── Om systemet tab ──────────────────────────────────────────
 with tab_om:
