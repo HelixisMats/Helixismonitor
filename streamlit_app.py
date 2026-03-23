@@ -1160,6 +1160,16 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                     (eta_df["eta_raw"]    >= 0.10) &
                     (eta_df["eta_raw"]    <= 0.90)
                 ].copy()
+    # Compute η statistics from qualifying samples
+    if not eta_clear.empty:
+        eta_median = float(eta_clear["eta_raw"].median())
+        eta_p90    = float(eta_clear["eta_raw"].quantile(0.90))
+        eta_p95    = float(eta_clear["eta_raw"].quantile(0.95))
+        eta_max    = float(eta_clear["eta_raw"].max())
+        n_pts      = len(eta_clear)
+        ETA_OPT    = float(max(0.10, min(0.85, eta_p90)))
+        p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000 \
+            if dni_est_current is not None else None
     # ── kt tiles ──────────────────────────────────────
     kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
     efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
@@ -1188,7 +1198,7 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
     st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
                 unsafe_allow_html=True)
 
-    if eta_p90 is not None and n_pts > 5 and 0.30 < eta_p90 < 0.85:
+    if eta_p90 is not None and n_pts > 5:
         eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
 
         # Headline metric card
@@ -1260,9 +1270,6 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
         st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
                    "Variability reflects cloud transients, tracking jitter, startup, soiling.")
 
-    elif eta_p90 is not None and not (0.30 < eta_p90 < 0.85):
-        st.warning(f"η (p90) = {eta_p90:.3f} — outside plausible range 0.30–0.85. "
-                   "Likely STRÅNG/sensor timestamp mismatch. Try a clearer period.")
     else:
         # Debug info — show why no samples qualified
         n_total   = len(eta_df) if not eta_df.empty else 0
