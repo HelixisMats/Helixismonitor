@@ -639,6 +639,7 @@ with tab_hist:
 
     with st.spinner(T["loading_hist"]):
         df_hist = fetch_history(hours)
+        df_smhi_h = fetch_smhi_history(hours)   # SMHI station data for same period
 
     if df_hist.empty:
         st.warning(T["no_data_interval"])
@@ -670,8 +671,17 @@ with tab_hist:
                     line=dict(width=1.8, color=color, dash=dash),
                     yaxis=yaxis,
                 ))
+        # Overlay outside temp (SMHI) on solar chart — shows temp effect on performance
+        if not df_smhi_h.empty:
+            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+            if not sub_ot.empty:
+                fig_solar.add_trace(go.Scatter(
+                    x=sub_ot["created_at"], y=sub_ot["value"],
+                    name="Outside temp °C (SMHI)", mode="lines",
+                    line=dict(width=1.5, color="#7B5EA7", dash="dot"),
+                    yaxis="y3"))
         fig_solar.update_layout(
-            height=320, margin=dict(l=0, r=50, t=10, b=0),
+            height=340, margin=dict(l=0, r=90, t=10, b=0),
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
@@ -679,6 +689,10 @@ with tab_hist:
                        tickfont=dict(color=AMBER), gridcolor=BORDER),
             yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
                         tickfont=dict(color=RUST), overlaying="y", side="right",
+                        showgrid=False),
+            yaxis3=dict(title=dict(text="°C", font=dict(color="#7B5EA7")),
+                        tickfont=dict(color="#7B5EA7"), overlaying="y",
+                        side="right", anchor="free", position=1.0,
                         showgrid=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
@@ -704,6 +718,14 @@ with tab_hist:
             fig_temp.add_trace(go.Scatter(x=sub_p["created_at"], y=sub_p["value"],
                 name=T["pressure_lbl"], mode="lines",
                 line=dict(width=1.5, color=SLATE, dash="dot"), yaxis="y2"))
+        # Outside temperature from SMHI (Helsingborg station)
+        if not df_smhi_h.empty:
+            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+            if not sub_ot.empty:
+                fig_temp.add_trace(go.Scatter(
+                    x=sub_ot["created_at"], y=sub_ot["value"],
+                    name="Outside temp (SMHI)", mode="lines",
+                    line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
         fig_temp.update_layout(
             height=320, margin=dict(l=0, r=50, t=10, b=0),
             hovermode="x unified",
