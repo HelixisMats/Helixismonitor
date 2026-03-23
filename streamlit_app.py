@@ -1292,103 +1292,115 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
         )
 
     # ── Graf: GHI sensor vs STRÅNG GHI + DNI ──────────────────
-    st.markdown('<div class="section-title">GHI sensor vs STRÅNG model (GHI & DNI)</div>',
+    # ── Single combined chart: GHI sensor + DNI STRÅNG + Power + η ──
+    st.markdown('<div class="section-title">Irradiance, power & optical efficiency — combined view</div>',
                 unsafe_allow_html=True)
-    fig_rad = go.Figure()
-    if not df_cmp.empty:
-        sub_ghi = df_cmp[df_cmp["sensor"] == "irradiance"]
-        if not sub_ghi.empty:
-            fig_rad.add_trace(go.Scatter(
-                x=sub_ghi["created_at"], y=sub_ghi["value"],
-                name="GHI sensor (on-site)", mode="lines",
-                line=dict(color=AMBER, width=2.5)))
-    if not df_st.empty:
-        sub_gm = df_st[df_st["sensor"] == "ghi_strang"]
-        sub_dm = df_st[df_st["sensor"] == "dni_strang"]
-        if not sub_gm.empty:
-            fig_rad.add_trace(go.Scatter(
-                x=sub_gm["created_at"], y=sub_gm["value"],
-                name="GHI STRÅNG model", mode="lines",
-                line=dict(color=SLATE, width=1.5, dash="dot")))
-        if not sub_dm.empty:
-            fig_rad.add_trace(go.Scatter(
-                x=sub_dm["created_at"], y=sub_dm["value"],
-                name="DNI STRÅNG model", mode="lines",
-                line=dict(color=RUST, width=1.5, dash="dash")))
-    fig_rad.update_layout(
-        height=300, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="W/m²",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    font=dict(size=10, color=MUTED, family="Inter")),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=MUTED, family="Inter"))
-    fig_rad.update_xaxes(showgrid=False, color=MUTED)
-    fig_rad.update_yaxes(gridcolor=BORDER, color=MUTED)
-    st.plotly_chart(fig_rad, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+    st.caption("Only periods with GHI > 100 W/m² or Power > 0.5 kW shown. "
+               "DNI from STRÅNG model (hourly). η = P / (DNI × 12.35 m²).")
 
-    # ── Graf: Faktisk vs teoretisk effekt ─────────────────────
-    if not df_st.empty and not df_cmp.empty and not merged.empty:
-        st.markdown('<div class="section-title">Actual vs theoretical power output</div>',
-                    unsafe_allow_html=True)
+    # Build combined dataframe: sensor irradiance + power + STRÅNG DNI
+    irr_all = df_cmp[df_cmp["sensor"]=="irradiance"][["created_at","value"]].rename(columns={"value":"ghi"})
+    pwr_all = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"power"})
 
-        # Merge sensor power with STRÅNG kt to get theoretical per timestep
-        pwr_df = df_cmp[df_cmp["sensor"] == "power"][["created_at","value"]].rename(columns={"value":"power"})
-        irr_df = df_cmp[df_cmp["sensor"] == "irradiance"][["created_at","value"]].rename(columns={"value":"ghi_sensor"})
-        kt_df  = merged[["created_at","kt"]]
-
-        # Use STRÅNG DNI directly for theoretical power
+    if not irr_all.empty and not pwr_all.empty:
+        combo = pd.merge_asof(irr_all.sort_values("created_at"),
+                              pwr_all.sort_values("created_at"),
+                              on="created_at", tolerance=pd.Timedelta("5min"))
         if not dni_strang_df.empty:
-            tmp = pd.merge_asof(
-                pwr_df.sort_values("created_at"),
-                dni_strang_df.sort_values("created_at"),
-                on="created_at", tolerance=pd.Timedelta("65min"),
-                direction="nearest")
-            tmp = tmp.dropna(subset=["power","dni_strang"])
+            combo = pd.merge_asof(combo.sort_values("created_at"),
+                                  dni_strang_df.sort_values("created_at"),
+                                  on="created_at", tolerance=pd.Timedelta("65min"),
+                                  direction="nearest")
         else:
-            tmp = pd.DataFrame()
-        if not tmp.empty:
-            _eta = ETA_OPT if (isinstance(ETA_OPT, float) and 0.30 < ETA_OPT < 0.85) else 0.65
-            tmp["p_theoretical"] = (tmp["dni_strang"] * 12.35 * _eta / 1000).clip(0, 15)
+            combo["dni_strang"] = None
 
-            fig_pwr = go.Figure()
-            fig_pwr.add_trace(go.Scatter(
-                x=tmp["created_at"], y=tmp["p_theoretical"],
-                name="Theoretical max (kW)", mode="lines",
-                line=dict(color=SLATE, width=1.5, dash="dot"),
-                fill="tozeroy", fillcolor=f"rgba(46,94,160,0.08)"))
-            fig_pwr.add_trace(go.Scatter(
-                x=tmp["created_at"], y=tmp["power"],
-                name="Actual power (kW)", mode="lines",
-                line=dict(color=RUST, width=2.5),
-                fill="tozeroy", fillcolor=f"rgba(168,48,48,0.12)"))
-            fig_pwr.update_layout(
-                height=280, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="kW",
+        # Filter: only show where sun is up or system running
+        mask = (combo["ghi"] > 100) | (combo["power"] > 0.5)
+        combo = combo[mask].copy()
+
+        # Compute η per point where DNI available and meaningful
+        if "dni_strang" in combo.columns:
+            denom = (combo["dni_strang"] * 12.35 / 1000).replace(0, float("nan"))
+            combo["eta_pt"] = (combo["power"] / denom).where(
+                (combo["dni_strang"] > 200) & (combo["power"] > 0.5))
+            combo.loc[combo["eta_pt"] > 0.95, "eta_pt"] = float("nan")  # clip outliers
+
+        if not combo.empty:
+            fig_combo = go.Figure()
+
+            # Left axis: irradiance W/m²
+            fig_combo.add_trace(go.Scatter(
+                x=combo["created_at"], y=combo["ghi"],
+                name="GHI sensor (W/m²)", mode="lines",
+                line=dict(color=AMBER, width=2), yaxis="y"))
+
+            if "dni_strang" in combo.columns:
+                fig_combo.add_trace(go.Scatter(
+                    x=combo["created_at"], y=combo["dni_strang"],
+                    name="DNI STRÅNG (W/m²)", mode="lines",
+                    line=dict(color=RUST, width=1.5, dash="dash"), yaxis="y"))
+
+            # Right axis: power kW
+            fig_combo.add_trace(go.Scatter(
+                x=combo["created_at"], y=combo["power"],
+                name="Thermal power (kW)", mode="lines",
+                line=dict(color=TEAL, width=2.5), yaxis="y2"))
+
+            # Right axis: η (0–1) — also on y2 scaled 0–10 to align with kW
+            if "eta_pt" in combo.columns:
+                fig_combo.add_trace(go.Scatter(
+                    x=combo["created_at"],
+                    y=combo["eta_pt"] * 10,  # scale: η×10 so 0.65 → 6.5 kW-equiv
+                    name="η × 10 (right axis)", mode="markers",
+                    marker=dict(color=BLUE, size=3, opacity=0.6), yaxis="y2"))
+
+            _eta_disp = f"η_p90 = {eta_p90:.3f}" if eta_p90 else "η not yet computed"
+            fig_combo.update_layout(
+                height=380, margin=dict(l=0, r=60, t=10, b=0),
                 hovermode="x unified",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
                             font=dict(size=10, color=MUTED, family="Inter")),
+                yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                           tickfont=dict(color=AMBER), gridcolor=BORDER, rangemode="tozero"),
+                yaxis2=dict(title=dict(text="kW  |  η×10", font=dict(color=TEAL)),
+                            tickfont=dict(color=TEAL), overlaying="y", side="right",
+                            showgrid=False, rangemode="tozero"),
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"))
-            fig_pwr.update_xaxes(showgrid=False, color=MUTED)
-            fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-            st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
-            st.caption("Gap between theoretical (dotted) and actual (red) = losses from optics, "
-                       "tracking, heat exchange, and system startup. Shaded area shows energy potential.")
+                font=dict(color=MUTED, family="Inter"),
+                annotations=[dict(
+                    text=_eta_disp, x=1, y=1.08, xref="paper", yref="paper",
+                    showarrow=False, font=dict(size=11, color=TEAL)
+                )]
+            )
+            fig_combo.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_combo, use_container_width=True,
+                config={"scrollZoom":True,"displayModeBar":True,
+                        "modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+            st.caption("η×10 plotted on power axis so 0.65 → 6.5 on right scale. "
+                       "Gap between DNI-based theoretical and actual power = system losses.")
 
     # ── kt-tidsserie ──────────────────────────────────────────
-    if not df_st.empty and "kt" in locals() and not merged.empty:
+    if not df_st.empty and not dni_strang_df.empty:
         st.markdown('<div class="section-title">Clearness index kt over time</div>',
                     unsafe_allow_html=True)
+        # Compute kt = DNI_STRÅNG / GHI_sensor at matched timestamps
+        kt_combo = pd.merge_asof(
+            irr_all[irr_all["ghi"] > 50].sort_values("created_at"),
+            dni_strang_df.sort_values("created_at"),
+            on="created_at", tolerance=pd.Timedelta("65min"), direction="nearest")
+        kt_combo = kt_combo.dropna()
+        kt_combo["kt"] = (kt_combo["dni_strang"] / kt_combo["ghi"]).clip(0, 2)
         fig_kt = go.Figure()
         fig_kt.add_trace(go.Scatter(
-            x=merged["created_at"], y=merged["kt"],
-            name="kt (DNI/GHI)", mode="lines",
+            x=kt_combo["created_at"], y=kt_combo["kt"],
+            name="kt = DNI_STRÅNG / GHI_sensor", mode="lines",
             line=dict(color=TEAL, width=2),
             fill="tozeroy", fillcolor="rgba(22,122,94,0.1)"))
         fig_kt.add_hline(y=0.7, line_dash="dot", line_color=AMBER,
-                         annotation_text="Clear sky threshold (kt=0.7)")
+                         annotation_text="Clear sky (kt=0.7)")
         fig_kt.update_layout(
-            height=220, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(title="kt", range=[0, 1.1], gridcolor=BORDER, color=MUTED),
+            height=200, margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="kt", range=[0, 1.5], gridcolor=BORDER, color=MUTED),
             hovermode="x unified",
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"))
