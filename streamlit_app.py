@@ -1140,25 +1140,60 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                 pwr_df = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"p_meas"})
                 kt_df  = merged[["created_at","kt","dni_m"]]
 
-                eta_df = pd.merge_asof(irr_df.sort_values("created_at"),
-                                       kt_df.sort_values("created_at"),
-                                       on="created_at", tolerance=pd.Timedelta("30min"))
-                eta_df = pd.merge_asof(eta_df.sort_values("created_at"),
-                                       pwr_df.sort_values("created_at"),
-                                       on="created_at", tolerance=pd.Timedelta("2min"))
-                eta_df = eta_df.dropna()
-                eta_df["dni_est"] = eta_df["kt"] * eta_df["ghi_s"]
-                # Filter: DNI > 400 W/m², power > 0.5 kW (exclude startup & night)
-                eta_clear = eta_df[(eta_df["dni_est"] > 400) & (eta_df["p_meas"] > 0.5)].copy()
-                eta_clear["eta"] = eta_clear["p_meas"] / (eta_clear["dni_est"] * APERTURE / 1000)
+                # ── Align datasets: only use overlapping time window ──────
+                # Actual data extents from sensor (not selection window)
+                sensor_t0 = irr_df["created_at"].min()
+                sensor_t1 = irr_df["created_at"].max()
 
-                eta_median = float(eta_clear["eta"].median()) if not eta_clear.empty else None
-                eta_p10    = float(eta_clear["eta"].quantile(0.10)) if not eta_clear.empty else None
-                eta_p90    = float(eta_clear["eta"].quantile(0.90)) if not eta_clear.empty else None
+                # Restrict STRÅNG kt to actual sensor data window AND daylight only
+                # Use on-site GHI > 10 W/m² as daylight flag — STRÅNG can have stale
+                # overnight values from previous day's run
+                irr_day = irr_df[irr_df["ghi_s"] > 10].copy()  # sensor confirms daylight
+                kt_day  = kt_df[
+                    (kt_df["created_at"] >= sensor_t0) &
+                    (kt_df["created_at"] <= sensor_t1)
+                ].copy()
+
+                # Merge sensor irradiance with power (tight 2 min — same device clock)
+                eta_df = pd.merge_asof(
+                    irr_day.sort_values("created_at"),
+                    pwr_df.sort_values("created_at"),
+                    on="created_at", tolerance=pd.Timedelta("2min"))
+
+                # Join STRÅNG kt with 90 min tolerance (hourly model, snaps to nearest hour)
+                # Forward-fill within 90 min only — don't carry yesterday's value into today
+                eta_df = pd.merge_asof(
+                    eta_df.sort_values("created_at"),
+                    kt_day.sort_values("created_at"),
+                    on="created_at", tolerance=pd.Timedelta("90min"))
+
+                eta_df = eta_df.dropna(subset=["ghi_s","p_meas","kt"])
+
+                if not eta_df.empty:
+                    eta_df["dni_est"] = eta_df["kt"] * eta_df["ghi_s"]
+                    eta_df["eta_raw"] = eta_df["p_meas"] / (
+                        eta_df["dni_est"] * APERTURE / 1000
+                    )
+                    # Filter: GHI > 400 (good sun), P > 1 kW (running), η in [0.10, 0.90]
+                    eta_clear = eta_df[
+                        (eta_df["ghi_s"]   > 400) &
+                        (eta_df["p_meas"]  > 1.0) &
+                        (eta_df["eta_raw"] > 0.10) &
+                        (eta_df["eta_raw"] < 0.90)
+                    ].copy()
+                else:
+                    eta_clear = pd.DataFrame()
+
+                eta_median = float(eta_clear["eta_raw"].median()) if not eta_clear.empty else None
+                eta_p10    = float(eta_clear["eta_raw"].quantile(0.10)) if not eta_clear.empty else None
+                eta_p90    = float(eta_clear["eta_raw"].quantile(0.90)) if not eta_clear.empty else None
                 n_pts      = len(eta_clear)
 
-                # Use derived or fallback efficiency for theoretical power
-                ETA_OPT = eta_median if eta_median else 0.65
+                # Use derived η if sensible, else fall back to 0.65
+                if eta_median and 0.30 < eta_median < 0.85:
+                    ETA_OPT = eta_median
+                else:
+                    ETA_OPT = 0.65
                 p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000
 
             # ── kt tiles ──────────────────────────────────────
@@ -1173,28 +1208,34 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
             ])
 
             # ── Optical efficiency derived metric ──────────────
-            if eta_median is not None and n_pts > 5:
+            if eta_median is not None and n_pts > 5 and 0.30 < eta_median < 0.85:
                 eta_color = TEAL if eta_median > 0.60 else (AMBER if eta_median > 0.45 else RUST)
                 st.markdown(
                     f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
                     f"border-left:3px solid {eta_color};margin:10px 0'>"
                     f"<div style='font-size:.68rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
-                    f"letter-spacing:.08em;margin-bottom:6px'>Optical efficiency η*</div>"
-                    f"<div style='font-size:1.6rem;font-weight:700;color:{eta_color}'>"
-                    f"{eta_median*100:.1f}%"
-                    f"<span style='font-size:.85rem;font-weight:400;color:{MUTED};margin-left:8px'>"
-                    f"range {eta_p10*100:.0f}–{eta_p90*100:.0f}% (p10–p90, n={n_pts} samples)</span></div>"
-                    f"<div style='font-size:.75rem;color:{MUTED};margin-top:4px'>"
-                    f"* Derived from measured power ÷ (DNI_estimated × {APERTURE} m²), "
-                    f"filtered to DNI > 400 W/m² and P > 0.5 kW. "
-                    f"DNI estimated as kt_STRÅNG × GHI_sensor. "
-                    f"Correlated value — accuracy depends on STRÅNG model precision (±10–15%).</div>"
+                    f"letter-spacing:.08em;margin-bottom:6px'>Optical efficiency η* (correlated)</div>"
+                    f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
+                    f"<span style='font-size:2rem;font-weight:700;color:{eta_color}'>{eta_median:.3f}</span>"
+                    f"<span style='font-size:.9rem;color:{MUTED}'>"
+                    f"range {eta_p10:.2f}–{eta_p90:.2f} (p10–p90) &nbsp;·&nbsp; n={n_pts} samples</span>"
+                    f"</div>"
+                    f"<div style='font-size:.72rem;color:{MUTED};margin-top:6px;line-height:1.5'>"
+                    f"* η = P_measured (kW) ÷ (DNI_estimated × {APERTURE} m²). "
+                    f"DNI_estimated = kt_STRÅNG × GHI_sensor. "
+                    f"Filtered to GHI > 400 W/m², P > 1 kW, η ∈ [0.10, 0.90]. "
+                    f"Correlated — STRÅNG precision ±10–15% propagates into η. "
+                    f"Reference: LC12 peak optical efficiency ~0.72 (manufacturer spec).</div>"
                     f"</div>",
                     unsafe_allow_html=True
                 )
-            elif eta_median is None:
+            elif eta_median is not None and not (0.30 < eta_median < 0.85):
+                st.warning(f"Optical efficiency derived as {eta_median:.3f} — outside plausible range "
+                           f"(0.30–0.85). Likely caused by STRÅNG/sensor timestamp mismatch. "
+                           f"Try a shorter or clearer period.")
+            else:
                 st.caption("Optical efficiency: insufficient clear-sky data in selected window. "
-                           "Select a longer period or a clearer day.")
+                           "Select a longer period (≥24h) on a clear day.")
 
             if efficiency_pct is not None:
                 eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
