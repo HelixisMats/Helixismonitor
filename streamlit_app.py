@@ -1051,9 +1051,11 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
 """)
 
     # ── Hämta data ────────────────────────────────────────────
-    h_cmp = st.selectbox(T["analysis_period"], [6, 12, 24, 48, 168], index=2,
-                          format_func=lambda h: f"{h}h" if h < 24 else
-                              (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"),
+    h_cmp = st.selectbox(T["analysis_period"],
+                          [6, 12, 24, 36, 48, 72, 96, 120, 168, 240, 336],
+                          index=4,
+                          format_func=lambda h: (f"{h}h" if h < 24 else
+                              f"{h//24}d" + (f" {h%24}h" if h%24 else "")),
                           key="smhi_h")
 
     col_l, col_r = st.columns(2)
@@ -1139,15 +1141,22 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                 close_mask = time_diffs <= pd.Timedelta("90min")
                 merged_close = merged[close_mask]
 
-                if not merged_close.empty and ghi_sensor_last > 10:
-                    # Pick the STRÅNG row with smallest time difference
+                if not merged_close.empty:
                     best_idx   = time_diffs[close_mask].idxmin()
                     kt_current = float(merged_close.loc[best_idx, "kt"])
-                    # Sanity check: kt should be 0–2.0 range
                     if kt_current > 2.0 or kt_current < 0:
                         kt_current = None
                 else:
-                    kt_current = None
+                    # Extend to 3h if nothing within 90 min (STRÅNG may lag)
+                    close_mask3h = time_diffs <= pd.Timedelta("3h")
+                    merged_3h = merged[close_mask3h]
+                    if not merged_3h.empty:
+                        best_idx   = time_diffs[close_mask3h].idxmin()
+                        kt_current = float(merged_3h.loc[best_idx, "kt"])
+                        if kt_current > 2.0 or kt_current < 0:
+                            kt_current = None
+                    else:
+                        kt_current = None
 
                 dni_est_current = (kt_current * ghi_sensor_last) if kt_current is not None else None
 
@@ -1224,9 +1233,19 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                 ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
                 ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
             ])
+            # Show what data range was actually used
+            if not df_st.empty and not df_cmp.empty:
+                st_t0 = df_st["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+                st_t1 = df_st["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+                s_t0  = df_cmp["created_at"].min().astimezone(SWE).strftime("%b %d %H:%M")
+                s_t1  = df_cmp["created_at"].max().astimezone(SWE).strftime("%b %d %H:%M")
+                n_sensor = len(df_cmp[df_cmp["sensor"]=="irradiance"])
+                n_strang = len(df_st)
+                st.caption(f"Data used — sensor: {s_t0} → {s_t1} ({n_sensor} pts) · "
+                           f"STRÅNG: {st_t0} → {st_t1} ({n_strang} pts)")
             if kt_current is None:
-                st.caption("⚠ kt: no STRÅNG value within ±90 min of latest sensor reading. "
-                           "STRÅNG updates hourly — try again shortly or select a different window.")
+                st.caption("⚠ kt: no STRÅNG value within ±3h of latest sensor reading. "
+                           "STRÅNG is hourly — analysis uses historical η from the window.")
 
             # ── Optical efficiency — headline + time series ────
             st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
