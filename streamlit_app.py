@@ -5,6 +5,7 @@ Tabs: Live (gauges) | Historik | SMHI & Analys
 
 import streamlit as st
 from supabase import create_client
+from streamlit_echarts import st_echarts
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
@@ -380,11 +381,24 @@ def sky_condition(irr, T):
     return                    T["night"],    "🌙",  MUTED
 
 def integrate_power(df) -> float | None:
-    """Trapezoid integration of power → kWh. Pass a pre-filtered DataFrame."""
-    sub = df[df["sensor"] == "power"].sort_values("created_at") if "sensor" in df.columns else df.sort_values("created_at")
-    if len(sub) < 2: return None
+    """Trapezoid integration of power → kWh. Handles both full and pre-filtered DataFrames."""
+    if df is None or df.empty:
+        return None
+    # Filter to power sensor if multi-sensor df, otherwise use as-is
+    if "sensor" in df.columns:
+        sub = df[df["sensor"] == "power"]
+    else:
+        sub = df  # already pre-filtered (e.g. from fetch_today_power)
+    # Ensure created_at exists
+    if "created_at" not in sub.columns:
+        return None
+    sub = sub.sort_values("created_at").dropna(subset=["created_at"])
+    if len(sub) < 2:
+        return None
+    # Use "value" column if present, else first numeric column
+    val_col = "value" if "value" in sub.columns else sub.select_dtypes("number").columns[0]
     times = sub["created_at"].astype("int64").values / 1e9 / 3600
-    power = sub["value"].values.astype(float)
+    power = sub[val_col].values.astype(float)
     try:
         import numpy as np
         fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
@@ -417,60 +431,48 @@ def linechart(df, sensors, colors, ylabel, height=300, extra_traces=None):
     return fig
 
 # ── Gauge functions ───────────────────────────────────────────
-def gauge_semi(label, val, mn, mx, unit, color, sub_text="", warn=None):
-    """Semi-circular Plotly indicator gauge."""
-    nfmt = ".0f" if unit in ("W/m²","°C") else (".2f" if unit in ("bar","m³/h") else ".1f")
-    steps = [{"range":[mn, warn if warn else mx],"color":BG2}]
-    if warn:
-        steps.append({"range":[warn,mx],"color":"#FFF0D0"})
-    threshold = ({"line":{"color":AMBER,"width":2},"thickness":0.75,"value":warn}
-                 if warn else None)
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=val if val is not None else mn,
-        number={"suffix":f" {unit}","font":{"size":18,"color":color,"family":"Inter"},
-                "valueformat":nfmt},
-        gauge={
-            "axis":{"range":[mn,mx],"tickfont":{"size":8,"color":MUTED,"family":"Inter"},
-                    "tickcolor":BORDER,"nticks":5},
-            "bar":{"color":color,"thickness":0.28},
-            "bgcolor":BG2,"borderwidth":1,"bordercolor":BORDER,
-            "steps":steps,
-            **({"threshold":threshold} if threshold else {}),
-        },
-    ))
-    fig.update_layout(height=185, margin=dict(l=20,r=20,t=10,b=8),
-                      paper_bgcolor="rgba(0,0,0,0)")
-    return fig
+def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None):
+    """ECharts dial gauge with green/amber/red zones."""
+    if val is None: val = mn
+    if green_end  is None: green_end  = mn + (mx - mn) * 0.70
+    if warn_start is None: warn_start = mn + (mx - mn) * 0.90
+    decimals = 0 if unit in ("W/m²", "°C") else (3 if unit == "m³/h" else 2)
+    safe  = max(0.001, (green_end  - mn) / (mx - mn))
+    caution = max(safe + 0.001, (warn_start - mn) / (mx - mn))
+    return {
+        "series": [{
+            "type": "gauge",
+            "startAngle": 215, "endAngle": -35,
+            "min": mn, "max": mx,
+            "splitNumber": 5,
+            "radius": "90%", "center": ["50%", "58%"],
+            "axisLine": {"lineStyle": {"width": 16, "color": [
+                [safe,    "#4CAF50"],
+                [caution, "#FF9800"],
+                [1,       "#F44336"],
+            ]}},
+            "pointer": {"length": "62%", "width": 5, "itemStyle": {"color": "auto"}},
+            "axisTick":  {"distance": -20, "length": 6,  "lineStyle": {"color": "#fff", "width": 1.5}},
+            "splitLine": {"distance": -24, "length": 14, "lineStyle": {"color": "#fff", "width": 2.5}},
+            "axisLabel": {"color": "inherit", "distance": 26, "fontSize": 10},
+            "detail": {
+                "valueAnimation": True,
+                "formatter": "{value} " + unit,
+                "color": "inherit", "fontSize": 20, "fontWeight": "bold",
+                "offsetCenter": [0, "30%"],
+            },
+            "title": {"show": True, "offsetCenter": [0, "65%"],
+                      "fontSize": 12, "fontWeight": "bold", "color": "#333"},
+            "data": [{"value": round(float(val), decimals), "name": label}],
+        }]
+    }
 
-def gauge_thermo(label, val, mn, mx, color):
-    """Vertical thermometer bar chart."""
-    display = val if val is not None else mn
-    mid = round((mn+mx)/2)
-    fill_h = max(0.5, display-mn)
-    val_y  = min(display+(mx-mn)*0.12, mx-(mx-mn)*0.08)
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=[0],y=[mx-mn],base=mn,
-        marker_color=LGRAY,marker_line=dict(color=BORDER,width=1),
-        width=0.5,showlegend=False,hoverinfo="skip"))
-    fig.add_trace(go.Bar(x=[0],y=[fill_h],base=mn,
-        marker_color=color,width=0.5,showlegend=False,
-        hovertemplate=f"<b>{display:.1f}°C</b><extra></extra>"))
-    fig.add_shape(type="circle",x0=-0.32,x1=0.32,y0=mn-7,y1=mn+7,
-        fillcolor=color,line_color=color)
-    fig.add_annotation(x=0,y=val_y,text=f"<b>{display:.1f}°</b>",
-        font=dict(size=11,color=color,family="Inter"),
-        showarrow=False,xanchor="center",yanchor="bottom")
-    fig.update_layout(
-        height=200,barmode="overlay",margin=dict(l=30,r=8,t=8,b=8),
-        title=dict(text=f"<b>{label}</b>",font=dict(size=10,color=TEXT,family="Inter"),x=0.5),
-        paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(range=[mn-10,mx],gridcolor=BORDER,color=MUTED,
-                   tickfont=dict(size=8,family="Inter"),
-                   tickvals=[mn,mid,mx],ticktext=[f"{mn}°",f"{mid}°",f"{mx}°"]),
-        xaxis=dict(showticklabels=False,showgrid=False,zeroline=False),
-        showlegend=False)
-    return fig
+
+def render_echarts_gauge(label, val, mn, mx, unit,
+                         green_end=None, warn_start=None, key=None, height=220):
+    opt = echarts_gauge(label, val, mn, mx, unit, green_end, warn_start)
+    st_echarts(options=opt, height=f"{height}px",
+               key=key or f"g_{label}_{mn}_{mx}")
 
 # ── Header ────────────────────────────────────────────────────
 hcols = st.columns([3, 3])
@@ -543,42 +545,34 @@ with tab_live:
             st.markdown(f'<div class="section-title">{T["temperatures"]}</div>',
                         unsafe_allow_html=True)
             tc = st.columns(5)
-            for col, (lbl_key, sensor, color, mn, mx, sub_key) in zip(tc, [
-                ("collector_r", "temp_right_coll", RUST,  20, 160, "recv_r_sub"),
-                ("collector_l", "temp_left_coll",  AMBER, 20, 160, "recv_l_sub"),
-                ("forward",     "temp_forward",    RUST,  20, 120, "fwd_sub"),
-                ("return",      "temp_return",     SLATE, 10, 100, "ret_sub"),
-                ("tank",        "temp_tank",       TEAL,  10, 100, "tank_sub"),
-            ]):
-                col.markdown(
-                    f"<div style='text-align:center;margin-bottom:-8px'>"
-                    f"<span style='font-size:12px;font-weight:600;color:{TEXT}'>{T[lbl_key]}</span><br>"
-                    f"<span style='font-size:10px;color:{MUTED}'>{T[sub_key]}</span></div>",
-                    unsafe_allow_html=True)
-                col.plotly_chart(
-                    gauge_semi(T[lbl_key], v.get(sensor), mn, mx, "°C", color),
-                    use_container_width=True, config={"displayModeBar": False})
+            temp_specs = [
+                ("collector_r","temp_right_coll", 20,160,110,140,"g_cr"),
+                ("collector_l","temp_left_coll",  20,160,110,140,"g_cl"),
+                ("forward",    "temp_forward",    20,120, 85,105,"g_fw"),
+                ("return",     "temp_return",     10,100, 60, 85,"g_rt"),
+                ("tank",       "temp_tank",       10,100, 70, 90,"g_tk"),
+            ]
+            for col,(lbl_key,sensor,mn,mx,green_end,warn_start,gkey) in zip(tc,temp_specs):
+                with col:
+                    render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
+                        green_end=green_end, warn_start=warn_start, key=gkey)
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             g1,g2,g3,g4 = st.columns(4)
-            def gauge_col(col, title, sub, val, mn, mx, unit, color, warn=None):
-                col.markdown(
-                    f"<div style='text-align:center;margin-bottom:-8px'>"
-                    f"<span style='font-size:12px;font-weight:600;color:{TEXT}'>{title}</span><br>"
-                    f"<span style='font-size:10px;color:{MUTED}'>{sub}</span></div>",
-                    unsafe_allow_html=True)
-                col.plotly_chart(gauge_semi(title, val, mn, mx, unit, color, warn=warn),
-                    use_container_width=True, config={"displayModeBar": False})
-
-            irr_sub = (T["irr_excellent"] if (irr and irr>600) else
-                       T["irr_moderate"]  if (irr and irr>150) else T["irr_low"])
-            psub = T["near_max_sub"] if (pres and pres>=5) else T["op_range_sub"]
-            gauge_col(g1, T["flow"],      T["htf_sub"],                v.get("flow"),  0,    1,    "m³/h", SLATE)
-            gauge_col(g2, T["power"],     T["max_power_sub"],          v.get("power"), 0,    9.2,  "kW",   RUST)
-            gauge_col(g3, T["irradiance"],f"{irr_sub} · 0–1500 W/m²",    irr,          0,    1500, "W/m²", irr_color)
-            gauge_col(g4, T["pressure"],  psub,                        pres,           0,    6,    "bar",  pcolor, warn=5)
+            with g1:
+                render_echarts_gauge(T["flow"], v.get("flow"), 0, 1, "m³/h",
+                    green_end=0.6, warn_start=0.9, key="g_flow")
+            with g2:
+                render_echarts_gauge(T["power"], v.get("power"), 0, 9.2, "kW",
+                    green_end=7.0, warn_start=8.5, key="g_power")
+            with g3:
+                render_echarts_gauge(T["irradiance"], irr, 0, 1500, "W/m²",
+                    green_end=900, warn_start=1200, key="g_irr")
+            with g4:
+                render_echarts_gauge(T["pressure"], pres, 0, 6, "bar",
+                    green_end=4.5, warn_start=5.2, key="g_pres")
 
             # ── Energy (HTML tiles) ──
             st.markdown(f'<div class="section-title">{T["energy"]}</div>',
