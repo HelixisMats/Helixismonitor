@@ -767,6 +767,124 @@ with tab_hist:
                    fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
                    help=T["heat_help"])
 
+        # ── Temporary: Three-method power correlation ────────────
+        with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
+            st.markdown(f"""
+**Method 1 — Power sensor (trapezoid integral):** Direct reading from `power` sensor, integrated over time.
+
+**Method 2 — Flow × ΔT (physics):** Completely independent calculation:
+`P = flow (m³/s) × ρ × cp × (T_forward − T_return)`
+Using ρ=1000 kg/m³ and cp=3800 J/kg·K (glycol mix estimate).
+
+**Method 3 — Heat energy sensor (÷1000):** Sensor delta converted from MWh → kWh.
+
+If Method 1 ≈ Method 2 → `power` sensor is **calculated** from flow×ΔT internally (not independent).
+If they diverge → `power` is a separate measurement.
+""")
+            # Build time-aligned dataframe
+            sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
+            dfs = {}
+            for s in sensors_needed:
+                sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
+                sub = sub.rename(columns={"value": s}).set_index("created_at")
+                dfs[s] = sub
+
+            if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
+                # Merge on time with tolerance
+                base = dfs["flow"]
+                for s in ["temp_forward","temp_return","power","heat_energy"]:
+                    if s in dfs:
+                        base = pd.merge_asof(
+                            base.sort_index().reset_index(),
+                            dfs[s].sort_index().reset_index(),
+                            on="created_at", tolerance=pd.Timedelta("2min")
+                        ).set_index("created_at")
+
+                base = base.dropna(subset=["flow","temp_forward","temp_return"])
+
+                # Method 2: P = flow_m3s × rho × cp × dT
+                RHO = 1000   # kg/m³ water/glycol
+                CP  = 3800   # J/kg·K — glycol mix (use 4186 for pure water)
+                base["p_physics"] = (
+                    base["flow"] / 3600 * RHO * CP *
+                    (base["temp_forward"] - base["temp_return"])
+                ) / 1000  # → kW
+
+                # Method 3: heat_energy delta × 1000 (MWh → kWh cumulative)
+                if "heat_energy" in base.columns:
+                    e0 = base["heat_energy"].dropna().iloc[0] if not base["heat_energy"].dropna().empty else None
+                    if e0 is not None:
+                        base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
+
+                # Chart: power comparison
+                fig_3m = go.Figure()
+                if "power" in base.columns:
+                    fig_3m.add_trace(go.Scatter(
+                        x=base.index, y=base["power"],
+                        name="Method 1: power sensor (kW)",
+                        mode="lines", line=dict(color=RUST, width=2)))
+                fig_3m.add_trace(go.Scatter(
+                    x=base.index, y=base["p_physics"],
+                    name=f"Method 2: flow×ΔT (kW, cp={CP})",
+                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+                fig_3m.update_layout(
+                    height=280, margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis_title="kW", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig_3m.update_xaxes(showgrid=False, color=MUTED)
+                fig_3m.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_3m, use_container_width=True)
+
+                # Correlation metric
+                if "power" in base.columns:
+                    both = base[["power","p_physics"]].dropna()
+                    if len(both) > 10:
+                        corr = both["power"].corr(both["p_physics"])
+                        ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Correlation (M1 vs M2)", f"{corr:.3f}",
+                            help="1.0 = perfect match. >0.99 strongly suggests power is calculated from flow×ΔT")
+                        c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
+                            help="Should be ~1.0 if same formula. Deviation reveals different cp or calibration")
+                        c3.metric("cp used", f"{CP} J/kg·K",
+                            help="Adjust if fluid is different. Pure water=4186, 30% glycol≈3800, 50% glycol≈3500")
+
+                        if corr > 0.99:
+                            st.info("🔗 Correlation >0.99 — **power sensor is almost certainly calculated from flow×ΔT** "
+                                    "internally in the controller. Methods 1 and 2 are not independent.")
+                        elif corr > 0.95:
+                            st.warning("⚠️ Correlation 0.95–0.99 — likely same source, small calibration difference.")
+                        else:
+                            st.success("✅ Correlation <0.95 — power sensor appears to be an independent measurement.")
+
+                # cp slider for exploration
+                cp_val = st.slider("Adjust cp (J/kg·K) to test fluid type",
+                                   min_value=3400, max_value=4200, value=CP, step=50,
+                                   help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
+                if cp_val != CP:
+                    base["p_physics_adj"] = (base["flow"] / 3600 * RHO * cp_val *
+                        (base["temp_forward"] - base["temp_return"])) / 1000
+                    fig_adj = go.Figure()
+                    if "power" in base.columns:
+                        fig_adj.add_trace(go.Scatter(x=base.index, y=base["power"],
+                            name="Method 1: power sensor", mode="lines",
+                            line=dict(color=RUST, width=2)))
+                    fig_adj.add_trace(go.Scatter(x=base.index, y=base["p_physics_adj"],
+                        name=f"Method 2: flow×ΔT (cp={cp_val})", mode="lines",
+                        line=dict(color=TEAL, width=2, dash="dot")))
+                    fig_adj.update_layout(height=220, margin=dict(l=0,r=0,t=10,b=0),
+                        yaxis_title="kW", hovermode="x unified",
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"))
+                    fig_adj.update_xaxes(showgrid=False, color=MUTED)
+                    fig_adj.update_yaxes(gridcolor=BORDER, color=MUTED)
+                    st.plotly_chart(fig_adj, use_container_width=True)
+            else:
+                st.info("Need flow, temp_forward and temp_return data in selected window.")
+
         with st.expander(f"📥 {T['raw_export']}"):
             piv2 = df_hist.pivot_table(
                 index="created_at", columns="sensor",
