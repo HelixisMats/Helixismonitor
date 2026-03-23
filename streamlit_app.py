@@ -206,35 +206,53 @@ def fetch_today_power() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def fetch_strang(days_back: int = 1):
-    """Fetch DNI+GHI from SMHI STRÅNG. Returns (DataFrame, errors_dict)."""
-    from_dt = (datetime.now(SWE) - timedelta(days=days_back)).strftime("%Y%m%d")
-    to_dt   = datetime.now(SWE).strftime("%Y%m%d")
+    """
+    Fetch DNI+GHI from SMHI STRÅNG via the new Open Data API.
+    New URL: opendata-download-metanalys.smhi.se/api/category/strang1g/...
+    Parameter 116=GHI, 118=DNI
+    Time format: YYYYMMDDhh  (hour appended)
+    Returns (DataFrame, errors_dict).
+    """
+    now_swe = datetime.now(SWE)
+    # from = yesterday 00:00, to = today current hour
+    from_dt = (now_swe - timedelta(days=days_back)).strftime("%Y%m%d") + "00"
+    to_dt   = now_swe.strftime("%Y%m%d%H")
+    base    = "https://opendata-download-metanalys.smhi.se/api/category/strang1g/version/1"
     rows, errors = [], {}
     for par, name in [("116", "ghi_strang"), ("118", "dni_strang")]:
-        url = (f"https://strang.smhi.se/extraction/getparticular.php"
-               f"?par={par}&from={from_dt}&to={to_dt}"
-               f"&lat={SITE_LAT}&lon={SITE_LON}&file=csv")
+        url = (f"{base}/geotype/point"
+               f"/lon/{SITE_LON}/lat/{SITE_LAT}"
+               f"/parameter/{par}/data.json"
+               f"?from={from_dt}&to={to_dt}&interval=hourly")
         try:
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
-                errors[name] = f"HTTP {r.status_code}"
+                errors[name] = f"HTTP {r.status_code} · {url}"
                 continue
-            text = r.text.strip()
-            if not text:
-                errors[name] = "Empty response"
+            data = r.json()
+            # Response is a list of {date_time, value} or wrapped in timeSeries
+            items = data if isinstance(data, list) else data.get("timeSeries", [])
+            if not items:
+                errors[name] = f"Empty JSON response · keys: {list(data.keys()) if isinstance(data, dict) else 'list'}"
                 continue
             parsed = 0
-            for line in text.splitlines():
-                parts = line.split(";")
-                if len(parts) < 2: continue
+            for item in items:
                 try:
-                    rows.append({"created_at": pd.to_datetime(parts[0].strip(), utc=True),
-                                 "sensor": name, "value": float(parts[1].strip())})
+                    # date_time is epoch ms or ISO string
+                    dt_raw = item.get("date_time") or item.get("dateTime") or item.get("t")
+                    val    = item.get("value") or item.get("v")
+                    if dt_raw is None or val is None:
+                        continue
+                    if isinstance(dt_raw, (int, float)):
+                        ts = pd.to_datetime(dt_raw, unit="ms", utc=True)
+                    else:
+                        ts = pd.to_datetime(dt_raw, utc=True)
+                    rows.append({"created_at": ts, "sensor": name, "value": float(val)})
                     parsed += 1
                 except Exception:
                     continue
             if parsed == 0:
-                errors[name] = f"No parseable rows. First line: {text.splitlines()[0][:100]}"
+                errors[name] = f"Could not parse response. Sample: {str(items[:2])[:200]}"
         except requests.exceptions.ConnectionError as e:
             errors[name] = f"Connection error: {e}"
         except Exception as e:
@@ -770,18 +788,22 @@ with tab_hist:
         # ── Temporary: Three-method power correlation ────────────
         with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
             st.markdown(f"""
-**Method 1 — Power sensor (trapezoid integral):** Direct reading from `power` sensor, integrated over time.
+**M1 — Power sensor:** Direct `power` reading, kW.
+**M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
+**M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
 
-**Method 2 — Flow × ΔT (physics):** Completely independent calculation:
-`P = flow (m³/s) × ρ × cp × (T_forward − T_return)`
-Using ρ=1000 kg/m³ and cp=3800 J/kg·K (glycol mix estimate).
-
-**Method 3 — Heat energy sensor (÷1000):** Sensor delta converted from MWh → kWh.
-
-If Method 1 ≈ Method 2 → `power` sensor is **calculated** from flow×ΔT internally (not independent).
-If they diverge → `power` is a separate measurement.
+**Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
+If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
+Ratio M1/M2 reveals the actual cp of the fluid.
 """)
-            # Build time-aligned dataframe
+            RHO = 1000
+            CP_DEFAULT = 3800
+
+            # cp slider — always visible so it drives both charts
+            cp_val = st.slider("cp (J/kg·K) — adjust to match M1 vs M2",
+                               min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
+                               help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
+
             sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
             dfs = {}
             for s in sensors_needed:
@@ -790,98 +812,150 @@ If they diverge → `power` is a separate measurement.
                 dfs[s] = sub
 
             if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
-                # Merge on time with tolerance
                 base = dfs["flow"]
                 for s in ["temp_forward","temp_return","power","heat_energy"]:
-                    if s in dfs:
+                    if s in dfs and not dfs[s].empty:
                         base = pd.merge_asof(
                             base.sort_index().reset_index(),
                             dfs[s].sort_index().reset_index(),
                             on="created_at", tolerance=pd.Timedelta("2min")
                         ).set_index("created_at")
-
                 base = base.dropna(subset=["flow","temp_forward","temp_return"])
 
-                # Method 2: P = flow_m3s × rho × cp × dT
-                RHO = 1000   # kg/m³ water/glycol
-                CP  = 3800   # J/kg·K — glycol mix (use 4186 for pure water)
+                # M2 with selected cp
                 base["p_physics"] = (
-                    base["flow"] / 3600 * RHO * CP *
+                    base["flow"] / 3600 * RHO * cp_val *
                     (base["temp_forward"] - base["temp_return"])
-                ) / 1000  # → kW
+                ) / 1000
 
-                # Method 3: heat_energy delta × 1000 (MWh → kWh cumulative)
-                if "heat_energy" in base.columns:
-                    e0 = base["heat_energy"].dropna().iloc[0] if not base["heat_energy"].dropna().empty else None
-                    if e0 is not None:
-                        base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
+                # M3: cumulative delta from t₀ in kWh
+                if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
+                    e0 = float(base["heat_energy"].dropna().iloc[0])
+                    base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
 
-                # Chart: power comparison
-                fig_3m = go.Figure()
+                # ── Instantaneous power chart (M1 vs M2) ──────────
+                st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
+                            unsafe_allow_html=True)
+                fig_pwr = go.Figure()
                 if "power" in base.columns:
-                    fig_3m.add_trace(go.Scatter(
+                    fig_pwr.add_trace(go.Scatter(
                         x=base.index, y=base["power"],
-                        name="Method 1: power sensor (kW)",
+                        name="M1: power sensor (kW)",
                         mode="lines", line=dict(color=RUST, width=2)))
-                fig_3m.add_trace(go.Scatter(
+                fig_pwr.add_trace(go.Scatter(
                     x=base.index, y=base["p_physics"],
-                    name=f"Method 2: flow×ΔT (kW, cp={CP})",
+                    name=f"M2: flow×ΔT (kW, cp={cp_val})",
                     mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
-                fig_3m.update_layout(
-                    height=280, margin=dict(l=0,r=0,t=10,b=0),
+                fig_pwr.update_layout(
+                    height=260, margin=dict(l=0,r=0,t=10,b=0),
                     yaxis_title="kW", hovermode="x unified",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                 font=dict(size=10, color=MUTED, family="Inter")),
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     font=dict(color=MUTED, family="Inter"))
-                fig_3m.update_xaxes(showgrid=False, color=MUTED)
-                fig_3m.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_3m, use_container_width=True)
+                fig_pwr.update_xaxes(showgrid=False, color=MUTED)
+                fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_pwr, use_container_width=True)
 
-                # Correlation metric
+                # ── Correlation metrics ────────────────────────────
                 if "power" in base.columns:
                     both = base[["power","p_physics"]].dropna()
                     if len(both) > 10:
-                        corr = both["power"].corr(both["p_physics"])
+                        corr  = both["power"].corr(both["p_physics"])
                         ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("Correlation (M1 vs M2)", f"{corr:.3f}",
-                            help="1.0 = perfect match. >0.99 strongly suggests power is calculated from flow×ΔT")
+                        implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
+                            help=">0.99 = power is calculated from flow×ΔT in controller")
                         c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
-                            help="Should be ~1.0 if same formula. Deviation reveals different cp or calibration")
-                        c3.metric("cp used", f"{CP} J/kg·K",
-                            help="Adjust if fluid is different. Pure water=4186, 30% glycol≈3800, 50% glycol≈3500")
-
+                            help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
+                        c3.metric("cp used", f"{cp_val} J/kg·K")
+                        c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
+                            help="The cp value that would make M2 exactly match M1")
                         if corr > 0.99:
-                            st.info("🔗 Correlation >0.99 — **power sensor is almost certainly calculated from flow×ΔT** "
-                                    "internally in the controller. Methods 1 and 2 are not independent.")
+                            st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
+                                    "internally. M1 and M2 are **not independent**.")
                         elif corr > 0.95:
-                            st.warning("⚠️ Correlation 0.95–0.99 — likely same source, small calibration difference.")
+                            st.warning("⚠️ 0.95–0.99 — likely same source, small calibration difference.")
                         else:
-                            st.success("✅ Correlation <0.95 — power sensor appears to be an independent measurement.")
+                            st.success("✅ <0.95 — power sensor appears to be an independent measurement.")
 
-                # cp slider for exploration
-                cp_val = st.slider("Adjust cp (J/kg·K) to test fluid type",
-                                   min_value=3400, max_value=4200, value=CP, step=50,
-                                   help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
-                if cp_val != CP:
-                    base["p_physics_adj"] = (base["flow"] / 3600 * RHO * cp_val *
-                        (base["temp_forward"] - base["temp_return"])) / 1000
-                    fig_adj = go.Figure()
-                    if "power" in base.columns:
-                        fig_adj.add_trace(go.Scatter(x=base.index, y=base["power"],
-                            name="Method 1: power sensor", mode="lines",
-                            line=dict(color=RUST, width=2)))
-                    fig_adj.add_trace(go.Scatter(x=base.index, y=base["p_physics_adj"],
-                        name=f"Method 2: flow×ΔT (cp={cp_val})", mode="lines",
-                        line=dict(color=TEAL, width=2, dash="dot")))
-                    fig_adj.update_layout(height=220, margin=dict(l=0,r=0,t=10,b=0),
-                        yaxis_title="kW", hovermode="x unified",
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color=MUTED, family="Inter"))
-                    fig_adj.update_xaxes(showgrid=False, color=MUTED)
-                    fig_adj.update_yaxes(gridcolor=BORDER, color=MUTED)
-                    st.plotly_chart(fig_adj, use_container_width=True)
+                # ── Cumulative energy chart (M1 + M2 + M3) ────────
+                st.markdown(f'<div class="section-title">Cumulative energy from t₀ — all 3 methods (kWh)</div>',
+                            unsafe_allow_html=True)
+
+                # M1 cumulative: trapezoid of power sensor
+                pwr_sub = base["power"].dropna()
+                times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
+                try:
+                    import numpy as np
+                    fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+                    cum_m1 = []
+                    t_arr = times_h.values
+                    p_arr = pwr_sub.values
+                    t0_h  = t_arr[0]
+                    for i in range(len(t_arr)):
+                        cum_m1.append(float(max(0, fn(p_arr[:i+1], t_arr[:i+1]) - t0_h * 0)))
+                    # simpler: running integral
+                    cum_m1 = [0.0]
+                    for i in range(1, len(t_arr)):
+                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+                except Exception:
+                    cum_m1 = [0.0]
+                    for i in range(1, len(t_arr)):
+                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+
+                # M2 cumulative: trapezoid of p_physics aligned to same index
+                phy_sub = base["p_physics"].reindex(pwr_sub.index, method="nearest")
+                ph_arr  = phy_sub.values
+                cum_m2  = [0.0]
+                for i in range(1, len(t_arr)):
+                    cum_m2.append(cum_m2[-1] + (ph_arr[i]+ph_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+
+                fig_cum = go.Figure()
+                fig_cum.add_trace(go.Scatter(
+                    x=pwr_sub.index, y=cum_m1,
+                    name="M1 cumulative (power sensor, kWh)",
+                    mode="lines", line=dict(color=RUST, width=2)))
+                fig_cum.add_trace(go.Scatter(
+                    x=pwr_sub.index, y=cum_m2,
+                    name=f"M2 cumulative (flow×ΔT cp={cp_val}, kWh)",
+                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+
+                # M3: heat_energy counter delta
+                if "heat_kwh_delta" in base.columns:
+                    m3_sub = base["heat_kwh_delta"].dropna()
+                    if not m3_sub.empty:
+                        fig_cum.add_trace(go.Scatter(
+                            x=m3_sub.index, y=m3_sub.values,
+                            name="M3 cumulative (heat energy counter ÷1000→kWh)",
+                            mode="lines", line=dict(color=BLUE, width=2, dash="dash")))
+
+                fig_cum.update_layout(
+                    height=280, margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis_title="kWh", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig_cum.update_xaxes(showgrid=False, color=MUTED)
+                fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_cum, use_container_width=True)
+
+                # Three-way end-of-window summary
+                m1_end = cum_m1[-1] if cum_m1 else None
+                m2_end = cum_m2[-1] if cum_m2 else None
+                m3_end = float(base["heat_kwh_delta"].dropna().iloc[-1])                          if "heat_kwh_delta" in base.columns and not base["heat_kwh_delta"].dropna().empty else None
+                s1, s2, s3 = st.columns(3)
+                s1.metric("M1 total (window)", fmt(m1_end, 3, "kWh"))
+                s2.metric("M2 total (window)", fmt(m2_end, 3, "kWh"))
+                s3.metric("M3 delta (window)", fmt(m3_end, 3, "kWh"),
+                          help="Change in heat energy counter over this window. "
+                               "Already ×1000 (MWh→kWh). Should match M1 if calibrated.")
+                if m1_end and m3_end and m1_end > 0.1:
+                    m3_ratio = m3_end / m1_end
+                    st.caption(f"M3/M1 ratio: {m3_ratio:.3f} — "
+                               f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
             else:
                 st.info("Need flow, temp_forward and temp_return data in selected window.")
 
@@ -965,8 +1039,8 @@ pumpstörningar.
         with st.expander(f"⚠️ STRÅNG model: {len(strang_errors)} parameter(s) failed", expanded=True):
             for k, msg in strang_errors.items():
                 st.warning(f"**{k}**: {msg}")
-            st.caption(f"URL format: strang.smhi.se/extraction/getparticular.php"
-                       f"?par=118&from=YYYYMMDD&to=YYYYMMDD&lat={SITE_LAT}&lon={SITE_LON}&file=csv")
+            st.caption(f"New URL: opendata-download-metanalys.smhi.se/api/category/strang1g/version/1"
+                       f"/geotype/point/lon/{SITE_LON}/lat/{SITE_LAT}/parameter/118/data.json?from=YYYYMMDDhh&to=YYYYMMDDhh&interval=hourly")
     elif not df_strang.empty:
         sensors_loaded = df_strang["sensor"].unique().tolist()
         last_ts = df_strang["created_at"].max().astimezone(SWE).strftime("%H:%M")
