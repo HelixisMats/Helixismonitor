@@ -689,7 +689,7 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_solar.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_solar, use_container_width=True)
+        st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 2. Temperaturer & Tryck ──────────────────────────
         st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
@@ -723,7 +723,7 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_temp.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_temp, use_container_width=True)
+        st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 3. ΔT & Flöde ─────────────────────────────────────
         st.markdown('<div class="section-title">ΔT & Flöde</div>',
@@ -755,7 +755,7 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_dt.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_dt, use_container_width=True)
+        st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 4. Sammanfattning & Energi ────────────────────────
         st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
@@ -855,7 +855,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                     font=dict(color=MUTED, family="Inter"))
                 fig_pwr.update_xaxes(showgrid=False, color=MUTED)
                 fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_pwr, use_container_width=True)
+                st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
                 # ── Correlation metrics ────────────────────────────
                 if "power" in base.columns:
@@ -940,7 +940,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                     font=dict(color=MUTED, family="Inter"))
                 fig_cum.update_xaxes(showgrid=False, color=MUTED)
                 fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_cum, use_container_width=True)
+                st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
                 # Three-way end-of-window summary
                 m1_end = cum_m1[-1] if cum_m1 else None
@@ -1155,7 +1155,7 @@ pumpstörningar.
         font=dict(color=MUTED, family="Inter"))
     fig_rad.update_xaxes(showgrid=False, color=MUTED)
     fig_rad.update_yaxes(gridcolor=BORDER, color=MUTED)
-    st.plotly_chart(fig_rad, use_container_width=True)
+    st.plotly_chart(fig_rad, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
     # ── Graf: Faktisk vs teoretisk effekt ─────────────────────
     if not df_st.empty and not df_cmp.empty and not merged.empty:
@@ -1197,7 +1197,7 @@ pumpstörningar.
                 font=dict(color=MUTED, family="Inter"))
             fig_pwr.update_xaxes(showgrid=False, color=MUTED)
             fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-            st.plotly_chart(fig_pwr, use_container_width=True)
+            st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
             st.caption("Gap between theoretical (dotted) and actual (red) = losses from optics, "
                        "tracking, heat exchange, and system startup. Shaded area shows energy potential.")
 
@@ -1220,7 +1220,7 @@ pumpstörningar.
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"))
         fig_kt.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_kt, use_container_width=True)
+        st.plotly_chart(fig_kt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
         st.caption("kt > 0.7 = clear sky, direct sunlight optimal for concentrating systems. "
                    "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
 
