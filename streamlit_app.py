@@ -1125,79 +1125,41 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
             (df_strang["created_at"] <= s_t1)
         ].copy()
 
+    # Use STRÅNG DNI directly — skip kt=DNI/GHI which breaks when GHI_STRÅNG≈0
+    dni_strang_df = pd.DataFrame()
     if not df_st.empty:
-        ghi_st = df_st[df_st["sensor"]=="ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
-        dni_st = df_st[df_st["sensor"]=="dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
-        if not ghi_st.empty and not dni_st.empty:
-            merged = pd.merge_asof(ghi_st.sort_values("created_at"),
-                                   dni_st.sort_values("created_at"),
-                                   on="created_at", tolerance=pd.Timedelta("30min"))
-            merged = merged[merged["ghi_m"] > 20].dropna()
-        if not merged.empty:
-            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, None)
+        dni_rows = df_st[df_st["sensor"]=="dni_strang"][["created_at","value"]].copy()
+        dni_rows = dni_rows.rename(columns={"value":"dni_strang"})
+        dni_strang_df = dni_rows[dni_rows["dni_strang"] > 10].sort_values("created_at")
 
-            irr_live = df_cmp[df_cmp["sensor"] == "irradiance"].sort_values("created_at")
-            pwr_live = df_cmp[df_cmp["sensor"] == "power"].sort_values("created_at")
+    if not dni_strang_df.empty and not irr_live.empty:
+        last_ts    = irr_live["created_at"].iloc[-1]
+        ghi_last   = float(irr_live["value"].iloc[-1])
+        time_diffs = (dni_strang_df["created_at"] - last_ts).abs()
+        best_mask  = time_diffs <= pd.Timedelta("3h")
+        if best_mask.any():
+            best_idx        = time_diffs[best_mask].idxmin()
+            dni_est_current = float(dni_strang_df.loc[best_idx, "dni_strang"])
+            kt_current      = (dni_est_current / ghi_last) if ghi_last > 20 else None
 
-            if not irr_live.empty and not merged.empty:
-                # Find kt value closest in time to latest sensor reading (not just last row)
-                last_sensor_ts  = irr_live["created_at"].iloc[-1]
-                ghi_sensor_last = float(irr_live["value"].iloc[-1])
-                p_actual        = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
-
-                # Match STRÅNG kt to nearest hour within ±90 min of latest sensor reading
-                # AND ensure GHI sensor confirms daylight (>10 W/m²) at that moment
-                time_diffs = (merged["created_at"] - last_sensor_ts).abs()
-                close_mask = time_diffs <= pd.Timedelta("90min")
-                merged_close = merged[close_mask]
-
-                if not merged_close.empty:
-                    best_idx   = time_diffs[close_mask].idxmin()
-                    kt_current = float(merged_close.loc[best_idx, "kt"])
-                    if kt_current > 2.0 or kt_current < 0:
-                        kt_current = None
-                else:
-                    # Extend to 3h if nothing within 90 min (STRÅNG may lag)
-                    close_mask3h = time_diffs <= pd.Timedelta("3h")
-                    merged_3h = merged[close_mask3h]
-                    if not merged_3h.empty:
-                        best_idx   = time_diffs[close_mask3h].idxmin()
-                        kt_current = float(merged_3h.loc[best_idx, "kt"])
-                        if kt_current > 2.0 or kt_current < 0:
-                            kt_current = None
-                    else:
-                        kt_current = None
-
-                dni_est_current = (kt_current * ghi_sensor_last) if kt_current is not None else None
-
-                # ── Derive optical efficiency from historical data ──
-                # Merge sensor irradiance with STRÅNG kt and measured power
-                # Use only high-DNI moments (>400 W/m²) to filter startup/low-angle losses
-                irr_df = df_cmp[df_cmp["sensor"]=="irradiance"][["created_at","value"]].rename(columns={"value":"ghi_s"})
-                pwr_df = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"p_meas"})
-                kt_df  = merged[["created_at","kt","dni_m"]]
-
-                # ── Align datasets: only use overlapping time window ──────
-                # Actual data extents from sensor (not selection window)
-                sensor_t0 = irr_df["created_at"].min()
-                sensor_t1 = irr_df["created_at"].max()
-
-                # Restrict STRÅNG kt to actual sensor data window AND daylight only
-                # Use on-site GHI > 10 W/m² as daylight flag — STRÅNG can have stale
-                # overnight values from previous day's run
-                irr_day = irr_df[irr_df["ghi_s"] > 10].copy()  # sensor confirms daylight
-                kt_day  = kt_df[
-                    (kt_df["created_at"] >= sensor_t0) &
-                    (kt_df["created_at"] <= sensor_t1)
+        pwr_df = pwr_live[["created_at","value"]].rename(columns={"value":"p_meas"})
+        if not pwr_df.empty:
+            eta_df = pd.merge_asof(
+                pwr_df.sort_values("created_at"),
+                dni_strang_df.sort_values("created_at"),
+                on="created_at", tolerance=pd.Timedelta("65min"),
+                direction="nearest")
+            eta_df = eta_df.dropna(subset=["p_meas","dni_strang"])
+            if not eta_df.empty:
+                denom = (eta_df["dni_strang"] * APERTURE / 1000).replace(0, float("nan"))
+                eta_df["eta_raw"] = eta_df["p_meas"] / denom
+                eta_df["ghi_s"]   = eta_df["dni_strang"]
+                eta_clear = eta_df[
+                    (eta_df["dni_strang"] > 300) &
+                    (eta_df["p_meas"]     > 1.0) &
+                    (eta_df["eta_raw"]    >= 0.10) &
+                    (eta_df["eta_raw"]    <= 0.90)
                 ].copy()
-
-                # Step 1: merge sensor irradiance + power (tight 5 min — same clock)
-                eta_df = pd.merge_asof(
-                    irr_day.sort_values("created_at"),
-                    pwr_df.sort_values("created_at"),
-                    on="created_at", tolerance=pd.Timedelta("5min"))
-                eta_df = eta_df.dropna(subset=["ghi_s","p_meas"])
-
     # ── kt tiles ──────────────────────────────────────
     kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
     efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
@@ -1367,19 +1329,19 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
         irr_df = df_cmp[df_cmp["sensor"] == "irradiance"][["created_at","value"]].rename(columns={"value":"ghi_sensor"})
         kt_df  = merged[["created_at","kt"]]
 
-        # Merge: sensor power + irradiance (tight), then STRÅNG kt (nearest hourly)
-        tmp = pd.merge_asof(pwr_df.sort_values("created_at"),
-                            irr_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("5min"))
-        tmp = pd.merge_asof(tmp.sort_values("created_at"),
-                            kt_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("65min"),
-                            direction="nearest")
-        # Drop rows where STRÅNG is absent — genuine gaps show as breaks in chart
-        tmp = tmp.dropna(subset=["power","ghi_sensor","kt"])
+        # Use STRÅNG DNI directly for theoretical power
+        if not dni_strang_df.empty:
+            tmp = pd.merge_asof(
+                pwr_df.sort_values("created_at"),
+                dni_strang_df.sort_values("created_at"),
+                on="created_at", tolerance=pd.Timedelta("65min"),
+                direction="nearest")
+            tmp = tmp.dropna(subset=["power","dni_strang"])
+        else:
+            tmp = pd.DataFrame()
         if not tmp.empty:
-            _eta = ETA_OPT if (isinstance(ETA_OPT, float) and 0.3 < ETA_OPT < 0.85) else 0.65
-            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 * _eta / 1000).clip(0, 15)
+            _eta = ETA_OPT if (isinstance(ETA_OPT, float) and 0.30 < ETA_OPT < 0.85) else 0.65
+            tmp["p_theoretical"] = (tmp["dni_strang"] * 12.35 * _eta / 1000).clip(0, 15)
 
             fig_pwr = go.Figure()
             fig_pwr.add_trace(go.Scatter(
