@@ -1181,19 +1181,22 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                     (kt_df["created_at"] <= sensor_t1)
                 ].copy()
 
-                # Merge sensor irradiance with power (tight 2 min — same device clock)
+                # Step 1: merge sensor irradiance + power (tight 2 min — same clock)
                 eta_df = pd.merge_asof(
                     irr_day.sort_values("created_at"),
                     pwr_df.sort_values("created_at"),
                     on="created_at", tolerance=pd.Timedelta("2min"))
+                eta_df = eta_df.dropna(subset=["ghi_s","p_meas"])
 
-                # Join STRÅNG kt with 90 min tolerance (hourly model, snaps to nearest hour)
-                # Forward-fill within 90 min only — don't carry yesterday's value into today
+                # Step 2: join STRÅNG kt — STRICT 65 min max (just over one hour)
+                # This prevents STRÅNG values from being carried across gaps where
+                # STRÅNG data doesn't exist. Only use rows where STRÅNG is actually present.
                 eta_df = pd.merge_asof(
                     eta_df.sort_values("created_at"),
                     kt_day.sort_values("created_at"),
-                    on="created_at", tolerance=pd.Timedelta("90min"))
+                    on="created_at", tolerance=pd.Timedelta("65min"))
 
+                # Strict: drop ALL rows where either dataset is missing
                 eta_df = eta_df.dropna(subset=["ghi_s","p_meas","kt"])
 
                 if not eta_df.empty:
@@ -1388,15 +1391,19 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
         irr_df = df_cmp[df_cmp["sensor"] == "irradiance"][["created_at","value"]].rename(columns={"value":"ghi_sensor"})
         kt_df  = merged[["created_at","kt"]]
 
+        # Strict join — only compute theoretical power where STRÅNG data actually exists
+        # 65 min tolerance = just over one STRÅNG hour interval, prevents gap-filling
         tmp = pd.merge_asof(pwr_df.sort_values("created_at"),
-                            kt_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("1h"))
-        tmp = pd.merge_asof(tmp.sort_values("created_at"),
                             irr_df.sort_values("created_at"),
-                            on="created_at", tolerance=pd.Timedelta("10min"))
-        tmp = tmp.dropna()
+                            on="created_at", tolerance=pd.Timedelta("2min"))
+        tmp = pd.merge_asof(tmp.sort_values("created_at"),
+                            kt_df.sort_values("created_at"),
+                            on="created_at", tolerance=pd.Timedelta("65min"))
+        # Drop any row missing STRÅNG kt — no forward fill across gaps
+        tmp = tmp.dropna(subset=["power","ghi_sensor","kt"])
         if not tmp.empty:
-            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 * 0.65 / 1000).clip(0)
+            tmp["p_theoretical"] = (tmp["kt"] * tmp["ghi_sensor"] * 12.35 *
+                                    (ETA_OPT if "ETA_OPT" in dir() else 0.65) / 1000).clip(0, 15)
 
             fig_pwr = go.Figure()
             fig_pwr.add_trace(go.Scatter(
