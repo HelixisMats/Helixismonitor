@@ -974,45 +974,74 @@ Ratio M1/M2 reveals the actual cp of the fluid.
 with tab_smhi:
 
     # ── Förklaringstext ───────────────────────────────────────
-    with st.expander("ℹ️ Vad gör vi med denna data?", expanded=False):
+    with st.expander("ℹ️ Understanding STRÅNG model data — what each parameter means", expanded=False):
         st.markdown(f"""
-### Från GHI till DNI — varför det spelar roll för Helixis
+#### What is STRÅNG?
 
-Helixis LC12 är en **linjär solfångare (CSP)** som fokuserar direkt solljus via speglar mot
-ett mottagarrör. Till skillnad från plana solpaneler (som också nyttjar diffust ljus)
-kräver koncentrerade system nästan uteslutande **DNI — Direct Normal Irradiance**,
-dvs solstrålning som kommer *direkt* från solen längs en rak linje.
+STRÅNG is SMHI's gridded solar radiation model. Unlike weather stations (which only exist
+at fixed points), STRÅNG calculates radiation values for **any coordinate in the Nordic countries**
+using atmospheric physics and satellite cloud data. Resolution: 2.5 × 2.5 km, hourly.
 
-**Problemet:** DNI-mätare (pyrheliometrar) kostar 30 000–100 000 kr och kräver daglig skötsel.
-Vi har istället en GHI-sensor (global horisontell instrålning) som mäter allt ljus ovanifrån.
-
-**Lösningen — clearness index (kt):**
-
-SMHI:s modellsystem **STRÅNG** beräknar både GHI och DNI för exakt vår koordinat
-(56.248°N, 13.192°E) med en fysikalisk atmosfärmodell. Genom att jämföra:
-
-> `kt = DNI_STRÅNG / GHI_STRÅNG`
-
-får vi ett dimensionslöst tal 0–1 som beskriver hur "klar" himlen är.
-Under molnfria dagar är kt högt (0.7–0.9). Under molniga dagar sjunker kt mot 0.
-
-Vi kan sedan **estimera DNI på plats:**
-
-> `DNI_estimerat = kt × GHI_sensor`
-
-**Teoretisk maxeffekt:**
-
-Med känd DNI och systemparametrar kan vi beräkna vad Helixis *borde* producera:
-
-> `P_max = DNI × Apertur × η_optisk`
-> `P_max = DNI × 12.35 m² × 0.65 ≈ DNI × 8.0 W per W/m²`
-
-Skillnaden mellan `P_teoretisk` och `P_mätt` berättar om systemet jobbar optimalt —
-eller om det finns förluster i form av smuts, feljustering, termiska förluster eller
-pumpstörningar.
+No API key needed. Data is freely available from SMHI Open Data.
 
 ---
-*Data: SMHI STRÅNG-modellen (fri, ingen nyckel) + Helsingborg station 62040 för väder.*
+
+#### The three radiation parameters
+
+| Parameter | Full name | What it measures | Sensor type |
+|---|---|---|---|
+| **GHI** | Global Horizontal Irradiance | Total solar energy hitting a flat horizontal surface — direct + diffuse | Pyranometer (flat plate) |
+| **DNI** | Direct Normal Irradiance | Solar energy arriving in a straight line from the sun, measured perpendicular to the sun's rays | Pyrheliometer (tracks sun) |
+| **DHI** | Diffuse Horizontal Irradiance | Scattered light only (clouds, atmosphere) — GHI minus the direct component | Calculated |
+
+**Why DNI matters for Helixis:** The LC12 concentrates sunlight using mirrors. Diffuse light
+(scattered by clouds) arrives from all directions and cannot be focused. Only DNI contributes
+to useful output. On a heavily overcast day, GHI may be 200 W/m² but DNI is near zero — the
+system produces almost nothing despite "some" sunlight.
+
+---
+
+#### Clearness index kt
+
+`kt = DNI_STRÅNG / GHI_STRÅNG`
+
+A dimensionless ratio from 0 to ~0.9 describing sky clarity:
+
+| kt value | Sky condition | Helixis output |
+|---|---|---|
+| 0.75 – 0.90 | Clear sky, direct sun | Full output possible |
+| 0.50 – 0.75 | Mostly clear, thin haze | Reduced ~10–30% |
+| 0.25 – 0.50 | Partly cloudy | Significantly reduced |
+| 0.00 – 0.25 | Overcast | Near-zero output |
+
+**Note on kt > 1.0:** This can occur when your on-site GHI sensor reads slightly higher than
+the STRÅNG model (sensor calibration offset, or local reflections). Values above 1.0 are
+physically impossible — treat them as 1.0. The app clips kt at 1.0 for calculations.
+
+---
+
+#### How we estimate DNI without a pyrheliometer
+
+Since DNI sensors cost 30,000–100,000 SEK and require daily maintenance, we use:
+
+`DNI_estimated = kt_STRÅNG × GHI_sensor`
+
+This uses STRÅNG's sky-clarity ratio applied to our own on-site measurement.
+Accuracy is typically ±10–15% on clear days, worse on partially cloudy days
+(when cloud patterns between Örkelljunga and the STRÅNG grid cell differ).
+
+---
+
+#### Theoretical vs actual power
+
+`P_theoretical = DNI_estimated × 12.35 m² × 0.65 = DNI × 8.03 W per W/m²`
+
+The 0.65 factor is the optical efficiency (peak ~0.72, realistic with tracking error and
+mirror soiling ~0.65). The gap between theoretical and actual power reveals system losses:
+mirror soiling, tracking error, pump issues, heat exchanger efficiency, and startup losses.
+
+---
+*Sources: SMHI STRÅNG Open Data · Helsingborg station 62040 (temp/wind/humidity) · Växjö station 64565 (GHI station)*
 """)
 
     # ── Hämta data ────────────────────────────────────────────
@@ -1085,7 +1114,7 @@ pumpstörningar.
                                 on="created_at", tolerance=pd.Timedelta("30min"))
         merged  = merged[merged["ghi_m"] > 50].dropna()  # filter night/zeros
         if not merged.empty:
-            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, 1.2)
+            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, 1.0)  # kt physically max 1.0
 
             # Latest kt + DNI estimate from on-site GHI sensor
             irr_live = df_cmp[df_cmp["sensor"] == "irradiance"].sort_values("created_at")
