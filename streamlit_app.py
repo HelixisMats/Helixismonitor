@@ -1112,44 +1112,95 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
     dni_est_current = None
     p_theoretical = None
 
-    if not df_st.empty and not df_cmp.empty:
-        ghi_st  = df_st[df_st["sensor"] == "ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
-        dni_st  = df_st[df_st["sensor"] == "dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
-        merged  = pd.merge_asof(ghi_st.sort_values("created_at"),
-                                dni_st.sort_values("created_at"),
-                                on="created_at", tolerance=pd.Timedelta("30min"))
-        merged  = merged[merged["ghi_m"] > 50].dropna()  # filter night/zeros
-        if not merged.empty:
-            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, None)  # kt > 1.0 valid at low sun angles (DNI > GHI·cos(zenith))
+    APERTURE = 12.35  # m² — LC12 aperture area
 
-            # Latest kt + DNI estimate from on-site GHI sensor
+    if not df_st.empty and not df_cmp.empty:
+        ghi_st = df_st[df_st["sensor"] == "ghi_strang"][["created_at","value"]].rename(columns={"value":"ghi_m"})
+        dni_st = df_st[df_st["sensor"] == "dni_strang"][["created_at","value"]].rename(columns={"value":"dni_m"})
+        merged = pd.merge_asof(ghi_st.sort_values("created_at"),
+                               dni_st.sort_values("created_at"),
+                               on="created_at", tolerance=pd.Timedelta("30min"))
+        merged = merged[merged["ghi_m"] > 50].dropna()
+        if not merged.empty:
+            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, None)
+
             irr_live = df_cmp[df_cmp["sensor"] == "irradiance"].sort_values("created_at")
+            pwr_live = df_cmp[df_cmp["sensor"] == "power"].sort_values("created_at")
+
             if not irr_live.empty and not merged.empty:
                 kt_current      = float(merged["kt"].iloc[-1])
                 ghi_sensor_last = float(irr_live["value"].iloc[-1])
                 dni_est_current = kt_current * ghi_sensor_last
-                # Theoretical power: DNI × aperture × optical efficiency
-                APERTURE   = 12.35   # m²
-                ETA_OPT    = 0.65    # optical efficiency (peak ~0.72, realistic 0.65)
-                p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000  # kW
+                p_actual        = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
+
+                # ── Derive optical efficiency from historical data ──
+                # Merge sensor irradiance with STRÅNG kt and measured power
+                # Use only high-DNI moments (>400 W/m²) to filter startup/low-angle losses
+                irr_df = df_cmp[df_cmp["sensor"]=="irradiance"][["created_at","value"]].rename(columns={"value":"ghi_s"})
+                pwr_df = df_cmp[df_cmp["sensor"]=="power"][["created_at","value"]].rename(columns={"value":"p_meas"})
+                kt_df  = merged[["created_at","kt","dni_m"]]
+
+                eta_df = pd.merge_asof(irr_df.sort_values("created_at"),
+                                       kt_df.sort_values("created_at"),
+                                       on="created_at", tolerance=pd.Timedelta("30min"))
+                eta_df = pd.merge_asof(eta_df.sort_values("created_at"),
+                                       pwr_df.sort_values("created_at"),
+                                       on="created_at", tolerance=pd.Timedelta("2min"))
+                eta_df = eta_df.dropna()
+                eta_df["dni_est"] = eta_df["kt"] * eta_df["ghi_s"]
+                # Filter: DNI > 400 W/m², power > 0.5 kW (exclude startup & night)
+                eta_clear = eta_df[(eta_df["dni_est"] > 400) & (eta_df["p_meas"] > 0.5)].copy()
+                eta_clear["eta"] = eta_clear["p_meas"] / (eta_clear["dni_est"] * APERTURE / 1000)
+
+                eta_median = float(eta_clear["eta"].median()) if not eta_clear.empty else None
+                eta_p10    = float(eta_clear["eta"].quantile(0.10)) if not eta_clear.empty else None
+                eta_p90    = float(eta_clear["eta"].quantile(0.90)) if not eta_clear.empty else None
+                n_pts      = len(eta_clear)
+
+                # Use derived or fallback efficiency for theoretical power
+                ETA_OPT = eta_median if eta_median else 0.65
+                p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000
 
             # ── kt tiles ──────────────────────────────────────
-            kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
-            p_actual = float(df_cmp[df_cmp["sensor"]=="power"]["value"].iloc[-1])                        if not df_cmp[df_cmp["sensor"]=="power"].empty else None
+            kt_color  = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
             efficiency_pct = (p_actual / p_theoretical * 100) if p_theoretical and p_theoretical > 0.1 and p_actual else None
 
             render_tiles([
-                ("Clearness index kt",    kt_current,       "",    0, 1,    kt_color, 2, None),
-                ("DNI estimated",         dni_est_current,  "W/m²",0, 1000, AMBER,   0, None),
-                ("Theoretical max power", p_theoretical,    "kW",  0, 9.2,  RUST,    2, None),
-                ("Actual power",          p_actual,         "kW",  0, 9.2,  TEAL,    2, None),
+                ("Clearness index kt",    kt_current,      "",     0, 1.2,  kt_color, 2, None),
+                ("DNI estimated",         dni_est_current, "W/m²", 0, 1500, AMBER,    0, None),
+                ("Theoretical max power", p_theoretical,   "kW",   0, 9.2,  RUST,     2, None),
+                ("Actual power",          p_actual,        "kW",   0, 9.2,  TEAL,     2, None),
             ])
+
+            # ── Optical efficiency derived metric ──────────────
+            if eta_median is not None and n_pts > 5:
+                eta_color = TEAL if eta_median > 0.60 else (AMBER if eta_median > 0.45 else RUST)
+                st.markdown(
+                    f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
+                    f"border-left:3px solid {eta_color};margin:10px 0'>"
+                    f"<div style='font-size:.68rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
+                    f"letter-spacing:.08em;margin-bottom:6px'>Optical efficiency η*</div>"
+                    f"<div style='font-size:1.6rem;font-weight:700;color:{eta_color}'>"
+                    f"{eta_median*100:.1f}%"
+                    f"<span style='font-size:.85rem;font-weight:400;color:{MUTED};margin-left:8px'>"
+                    f"range {eta_p10*100:.0f}–{eta_p90*100:.0f}% (p10–p90, n={n_pts} samples)</span></div>"
+                    f"<div style='font-size:.75rem;color:{MUTED};margin-top:4px'>"
+                    f"* Derived from measured power ÷ (DNI_estimated × {APERTURE} m²), "
+                    f"filtered to DNI > 400 W/m² and P > 0.5 kW. "
+                    f"DNI estimated as kt_STRÅNG × GHI_sensor. "
+                    f"Correlated value — accuracy depends on STRÅNG model precision (±10–15%).</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+            elif eta_median is None:
+                st.caption("Optical efficiency: insufficient clear-sky data in selected window. "
+                           "Select a longer period or a clearer day.")
 
             if efficiency_pct is not None:
                 eff_color = TEAL if efficiency_pct > 75 else (AMBER if efficiency_pct > 40 else RUST)
                 st.markdown(
-                    f"<div style='margin:12px 0 4px;font-size:.9rem;color:{TEXT}'>"
-                    f"System performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
+                    f"<div style='margin:8px 0 4px;font-size:.9rem;color:{TEXT}'>"
+                    f"Instantaneous system performance: <b style='color:{eff_color}'>{efficiency_pct:.0f}%</b> "
                     f"of theoretical maximum"
                     f"<span style='font-size:.75rem;color:{MUTED};margin-left:8px'>"
                     f"({fmt(p_actual,2,'kW')} measured vs {fmt(p_theoretical,2,'kW')} theoretical)</span>"
