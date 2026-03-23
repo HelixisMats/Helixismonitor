@@ -371,9 +371,10 @@ def render_tiles(specs):
 
 def sky_condition(irr, T):
     if irr is None:    return "—",           "❓", MUTED
-    if irr >= 850:     return T["clear"],    "☀️",  AMBER
-    if irr >= 600:     return T["sunny"],    "🌤",  AMBER
-    if irr >= 350:     return T["partly"],   "⛅",  SLATE
+    if irr >= 1000:    return T["clear"],    "☀️",  AMBER   # >1000 fully possible in Sweden
+    if irr >= 700:     return T["clear"],    "☀️",  AMBER
+    if irr >= 500:     return T["sunny"],    "🌤",  AMBER
+    if irr >= 300:     return T["partly"],   "⛅",  SLATE
     if irr >= 100:     return T["cloudy"],   "🌥",  MUTED
     if irr >= 20:      return T["overcast"], "☁️",  MUTED
     return                    T["night"],    "🌙",  MUTED
@@ -513,7 +514,7 @@ with tab_live:
         is_live  = age_min < 15
         last_swe = last_ts.astimezone(SWE)
         irr, pres = v.get("irradiance"), v.get("pressure")
-        irr_color = AMBER if (irr and irr>700) else (SLATE if (irr and irr>200) else MUTED)
+        irr_color = AMBER if (irr and irr>600) else (SLATE if (irr and irr>200) else MUTED)
         pcolor    = RUST if (pres and pres>=5) else SLATE
 
         dot = TEAL if is_live else RUST
@@ -571,12 +572,12 @@ with tab_live:
                 col.plotly_chart(gauge_semi(title, val, mn, mx, unit, color, warn=warn),
                     use_container_width=True, config={"displayModeBar": False})
 
-            irr_sub = (T["irr_excellent"] if (irr and irr>700) else
-                       T["irr_moderate"]  if (irr and irr>200) else T["irr_low"])
+            irr_sub = (T["irr_excellent"] if (irr and irr>600) else
+                       T["irr_moderate"]  if (irr and irr>150) else T["irr_low"])
             psub = T["near_max_sub"] if (pres and pres>=5) else T["op_range_sub"]
             gauge_col(g1, T["flow"],      T["htf_sub"],                v.get("flow"),  0,    1,    "m³/h", SLATE)
             gauge_col(g2, T["power"],     T["max_power_sub"],          v.get("power"), 0,    9.2,  "kW",   RUST)
-            gauge_col(g3, T["irradiance"],f"{irr_sub} · max ~1350 W/m²", irr,          0,    1350, "W/m²", irr_color)
+            gauge_col(g3, T["irradiance"],f"{irr_sub} · 0–1500 W/m²",    irr,          0,    1500, "W/m²", irr_color)
             gauge_col(g4, T["pressure"],  psub,                        pres,           0,    6,    "bar",  pcolor, warn=5)
 
             # ── Energy (HTML tiles) ──
@@ -619,7 +620,7 @@ with tab_live:
             for col,(lbl,s,u,mn,mx,col_,dec,warn) in zip(cols2,[
                 (T["flow"],"flow","m³/h",0,1,SLATE,3,None),
                 (T["power"],"power","kW",0,9.2,RUST,2,None),
-                (T["irradiance"],"irradiance","W/m²",0,1350,irr_color,0,None),
+                (T["irradiance"],"irradiance","W/m²",0,1500,irr_color,0,None),
                 (T["pressure"],"pressure","bar",0,6,pcolor,2,5.0),
                 (T["wind"],"wind","m/s",0,20,SLATE,2,None),
                 ("ΔT","temp_difference","°C",0,50,BLUE,2,None)]):
@@ -1014,9 +1015,14 @@ A dimensionless ratio from 0 to ~0.9 describing sky clarity:
 | 0.25 – 0.50 | Partly cloudy | Significantly reduced |
 | 0.00 – 0.25 | Overcast | Near-zero output |
 
-**Note on kt > 1.0:** This can occur when your on-site GHI sensor reads slightly higher than
-the STRÅNG model (sensor calibration offset, or local reflections). Values above 1.0 are
-physically impossible — treat them as 1.0. The app clips kt at 1.0 for calculations.
+**Note on kt > 1.0:** This is physically valid at low solar elevation angles. Because GHI is
+measured on a horizontal surface while DNI is measured perpendicular to the sun:
+
+`GHI = DNI × cos(zenith angle) + diffuse`
+
+When the sun is low in the sky, DNI can exceed GHI, giving kt > 1.0 from STRÅNG.
+The app does not clip kt — the on-site sensor (IMT Si-RS485TC, rated 0–1500 W/m², ±1.6%) is
+trusted directly. Values above 1000 W/m² are fully possible on clear days in Sweden.
 
 ---
 
@@ -1081,7 +1087,7 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
     smhi_defs = {
         "temperature": ("Air temp",    "°C",  -20, 40,   SLATE, 1),
         "wind_speed":  ("Wind speed",  "m/s",   0, 25,   SLATE, 1),
-        "irradiance":  ("GHI (Växjö)", "W/m²",  0, 1350, AMBER, 0),
+        "irradiance":  ("GHI (Växjö)", "W/m²",  0, 1500, AMBER, 0),
         "humidity":    ("Humidity",    "%",      0, 100,  SLATE, 0),
     }
     tile_specs = []
@@ -1114,7 +1120,7 @@ mirror soiling, tracking error, pump issues, heat exchanger efficiency, and star
                                 on="created_at", tolerance=pd.Timedelta("30min"))
         merged  = merged[merged["ghi_m"] > 50].dropna()  # filter night/zeros
         if not merged.empty:
-            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, 1.0)  # kt physically max 1.0
+            merged["kt"] = (merged["dni_m"] / merged["ghi_m"]).clip(0, None)  # kt > 1.0 valid at low sun angles (DNI > GHI·cos(zenith))
 
             # Latest kt + DNI estimate from on-site GHI sensor
             irr_live = df_cmp[df_cmp["sensor"] == "irradiance"].sort_values("created_at")
