@@ -431,14 +431,38 @@ def linechart(df, sensors, colors, ylabel, height=300, extra_traces=None):
     return fig
 
 # ── Gauge functions ───────────────────────────────────────────
-def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None):
-    """ECharts dial gauge with green/amber/red zones."""
+def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mode="performance"):
+    """
+    ECharts dial gauge.
+    mode="performance"  — single green arc (higher = better, no danger zones)
+    mode="limit"        — green / amber / red (pressure, temps near max)
+    mode="temp"         — cool blue → green → warm red gradient across full range
+    """
     if val is None: val = mn
-    if green_end  is None: green_end  = mn + (mx - mn) * 0.70
-    if warn_start is None: warn_start = mn + (mx - mn) * 0.90
     decimals = 0 if unit in ("W/m²", "°C") else (3 if unit == "m³/h" else 2)
-    safe  = max(0.001, (green_end  - mn) / (mx - mn))
-    caution = max(safe + 0.001, (warn_start - mn) / (mx - mn))
+
+    if mode == "temp":
+        # Smooth 5-stop gradient: cold blue → teal → green → amber → red
+        colors = [
+            [0.20, "#5B8FD4"],  # cold blue
+            [0.40, "#4CAF50"],  # comfortable green
+            [0.65, "#8BC34A"],  # warm green
+            [0.85, "#FF9800"],  # hot amber
+            [1.00, "#F44336"],  # danger red
+        ]
+    elif mode == "limit":
+        if green_end  is None: green_end  = mn + (mx - mn) * 0.75
+        if warn_start is None: warn_start = mn + (mx - mn) * 0.90
+        safe    = max(0.001, (green_end  - mn) / (mx - mn))
+        caution = max(safe + 0.001, (warn_start - mn) / (mx - mn))
+        colors = [
+            [safe,    "#4CAF50"],
+            [caution, "#FF9800"],
+            [1.00,    "#F44336"],
+        ]
+    else:  # "performance" — solid green, no warning
+        colors = [[1.0, "#4CAF50"]]
+
     return {
         "series": [{
             "type": "gauge",
@@ -446,11 +470,7 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None):
             "min": mn, "max": mx,
             "splitNumber": 5,
             "radius": "90%", "center": ["50%", "58%"],
-            "axisLine": {"lineStyle": {"width": 16, "color": [
-                [safe,    "#4CAF50"],
-                [caution, "#FF9800"],
-                [1,       "#F44336"],
-            ]}},
+            "axisLine": {"lineStyle": {"width": 16, "color": colors}},
             "pointer": {"length": "62%", "width": 5, "itemStyle": {"color": "auto"}},
             "axisTick":  {"distance": -20, "length": 6,  "lineStyle": {"color": "#fff", "width": 1.5}},
             "splitLine": {"distance": -24, "length": 14, "lineStyle": {"color": "#fff", "width": 2.5}},
@@ -469,8 +489,9 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None):
 
 
 def render_echarts_gauge(label, val, mn, mx, unit,
-                         green_end=None, warn_start=None, key=None, height=220):
-    opt = echarts_gauge(label, val, mn, mx, unit, green_end, warn_start)
+                         green_end=None, warn_start=None,
+                         mode="performance", key=None, height=220):
+    opt = echarts_gauge(label, val, mn, mx, unit, green_end, warn_start, mode)
     st_echarts(options=opt, height=f"{height}px",
                key=key or f"g_{label}_{mn}_{mx}")
 
@@ -555,7 +576,7 @@ with tab_live:
             for col,(lbl_key,sensor,mn,mx,green_end,warn_start,gkey) in zip(tc,temp_specs):
                 with col:
                     render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
-                        green_end=green_end, warn_start=warn_start, key=gkey)
+                        mode="temp", key=gkey)
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
@@ -563,16 +584,16 @@ with tab_live:
             g1,g2,g3,g4 = st.columns(4)
             with g1:
                 render_echarts_gauge(T["flow"], v.get("flow"), 0, 1, "m³/h",
-                    green_end=0.6, warn_start=0.9, key="g_flow")
+                    mode="performance", key="g_flow")
             with g2:
                 render_echarts_gauge(T["power"], v.get("power"), 0, 9.2, "kW",
-                    green_end=7.0, warn_start=8.5, key="g_power")
+                    mode="performance", key="g_power")
             with g3:
                 render_echarts_gauge(T["irradiance"], irr, 0, 1500, "W/m²",
-                    green_end=900, warn_start=1200, key="g_irr")
+                    mode="performance", key="g_irr")
             with g4:
                 render_echarts_gauge(T["pressure"], pres, 0, 6, "bar",
-                    green_end=4.5, warn_start=5.2, key="g_pres")
+                    green_end=4.5, warn_start=5.2, mode="limit", key="g_pres")
 
             # ── Energy (HTML tiles) ──
             st.markdown(f'<div class="section-title">{T["energy"]}</div>',
