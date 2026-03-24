@@ -30,7 +30,7 @@ def send_alert_email(age_min: float):
         )
         msg["Subject"] = f"⚠️ Helixis: No sensor data for {age_min:.0f} min"
         msg["From"]    = gmail_user
-        msg["To"]      = "mats@helixis.se, eugene@helixis.se"
+        msg["To"]      = "mats@helixis.se, eugene.nedilko@helixis.se"
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(gmail_user, gmail_pass)
             server.send_message(msg)
@@ -607,29 +607,6 @@ with tab_live:
             f'<span class="ts-text">{last_swe.strftime("%H:%M:%S")} '
             f'{"· LIVE" if is_live else f"· {age_min:.0f} min sedan"}</span>',
             unsafe_allow_html=True)
-
-        # ── Test email button (temporary) ───────────────────
-        if st.button("📧 Test alert email", key="test_email"):
-            import smtplib
-            from email.mime.text import MIMEText
-            gmail_user = st.secrets.get("ALERT_GMAIL_USER", "")
-            gmail_pass = st.secrets.get("ALERT_GMAIL_APP_PASSWORD", "")
-            if not gmail_user:
-                st.error("❌ ALERT_GMAIL_USER not found in Secrets")
-            elif not gmail_pass:
-                st.error("❌ ALERT_GMAIL_APP_PASSWORD not found in Secrets")
-            else:
-                try:
-                    msg = MIMEText("Test alert from Helixis LC Monitor.", "plain", "utf-8")
-                    msg["Subject"] = "✅ Helixis alert test"
-                    msg["From"]    = gmail_user
-                    msg["To"]      = "mats@helixis.se, eugene@helixis.se"
-                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                        server.login(gmail_user, gmail_pass)
-                        server.send_message(msg)
-                    st.success(f"✅ Email sent from {gmail_user}")
-                except Exception as e:
-                    st.error(f"❌ Failed: {e}")
 
         # Email alert if data has been missing for 30–31 min (fires once per gap)
         # Uses a narrow window to avoid repeat emails every 30s
@@ -1215,6 +1192,28 @@ if is_internal and tab_smhi is not None:
             with st.expander(f"⚠️ {len(smhi_errors)} SMHI-stationskälla(or) saknas"):
                 for key, msg in smhi_errors.items():
                     st.warning(f"**{key}**: {msg}")
+
+        with st.expander("📧 Test alert email", expanded=False):
+            import smtplib
+            from email.mime.text import MIMEText
+            _gu = st.secrets.get("ALERT_GMAIL_USER", "")
+            _gp = st.secrets.get("ALERT_GMAIL_APP_PASSWORD", "")
+            st.caption(f"From: {_gu or '(not configured)'} → mats@helixis.se, eugene.nedilko@helixis.se")
+            if st.button("Send test email now", key="test_email"):
+                if not _gu or not _gp:
+                    st.error("❌ ALERT_GMAIL_USER or ALERT_GMAIL_APP_PASSWORD missing in Secrets")
+                else:
+                    try:
+                        _msg = MIMEText("Test alert from Helixis LC Monitor.", "plain", "utf-8")
+                        _msg["Subject"] = "✅ Helixis alert test"
+                        _msg["From"]    = _gu
+                        _msg["To"]      = "mats@helixis.se, eugene.nedilko@helixis.se"
+                        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as _srv:
+                            _srv.login(_gu, _gp)
+                            _srv.send_message(_msg)
+                        st.success(f"✅ Sent from {_gu}")
+                    except Exception as _e:
+                        st.error(f"❌ {_e}")
 
         if strang_errors:
             with st.expander(f"⚠️ STRÅNG model: {len(strang_errors)} parameter(s) failed", expanded=True):
