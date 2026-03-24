@@ -1273,7 +1273,7 @@ if is_internal and tab_smhi is not None:
         day_cols = st.columns(7)
         for i, col in enumerate(day_cols):
             d = _today - pd.Timedelta(days=6-i)
-            label = d.strftime("%a\n%d %b")
+            label = d.strftime("%a") + "\n" + d.strftime("%d %b")
             selected = d in st.session_state.smhi_selected_days
             if col.button(label,
                           key=f"day_{d}",
@@ -1290,7 +1290,7 @@ if is_internal and tab_smhi is not None:
             old_cols = st.columns(7)
             for i, col in enumerate(old_cols):
                 d = _today - pd.Timedelta(days=13-i)
-                label = d.strftime("%a\n%d %b")
+                label = d.strftime("%a") + "\n" + d.strftime("%d %b")
                 selected = d in st.session_state.smhi_selected_days
                 if col.button(label,
                               key=f"day_old_{d}",
