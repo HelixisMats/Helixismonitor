@@ -1379,42 +1379,60 @@ if is_internal and tab_smhi is not None:
                 kt_current      = (dni_est_current / ghi_last) if ghi_last > 20 else None
 
             pwr_df = pwr_live[["created_at","value"]].rename(columns={"value":"p_meas"})
-            if not pwr_df.empty:
-                eta_df = pd.merge_asof(
-                    pwr_df.sort_values("created_at"),
-                    dni_strang_df.sort_values("created_at"),
-                    on="created_at", tolerance=pd.Timedelta("65min"),
-                    direction="nearest")
-                eta_df = eta_df.dropna(subset=["p_meas","dni_strang"])
-                if not eta_df.empty:
-                    # Hourly integration — avoids thermal mass distortion
-                    eta_df = eta_df.sort_values("created_at")
-                    eta_df["dt_h"] = eta_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
-                    eta_df["e_out"] = eta_df["p_meas"] * eta_df["dt_h"]
-                    eta_df["e_in"]  = eta_df["dni_strang"] * APERTURE / 1000 * eta_df["dt_h"]
-                    eta_df["strang_hour"] = eta_df["created_at"].dt.floor("1h")
-                    hourly_eta = eta_df.groupby("strang_hour").agg(
-                        e_out=("e_out","sum"), e_in=("e_in","sum"),
-                        dni_mean=("dni_strang","mean"), p_mean=("p_meas","mean"),
-                        n=("p_meas","count")
-                    ).reset_index()
-                    hourly_eta = hourly_eta[
-                        (hourly_eta["dni_mean"] > 300) &
-                        (hourly_eta["p_mean"]   > 1.0) &
-                        (hourly_eta["n"]        > 10)
+        # Collector η: T_right (outlet) − T_left (inlet) × flow
+        # Pure optical efficiency — no pipe/HX losses
+        CP = 4186; RHO = 1000
+        tr_df = df_cmp[df_cmp["sensor"]=="temp_right_coll"][["created_at","value"]].rename(columns={"value":"t_out"})
+        tl_df = df_cmp[df_cmp["sensor"]=="temp_left_coll"][["created_at","value"]].rename(columns={"value":"t_in"})
+        fl_df = df_cmp[df_cmp["sensor"]=="flow"][["created_at","value"]].rename(columns={"value":"flow"})
+
+        if not tr_df.empty and not tl_df.empty and not fl_df.empty and not dni_strang_df.empty:
+            eta_df = pd.merge_asof(tr_df.sort_values("created_at"),
+                                   tl_df.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("2min"))
+            eta_df = pd.merge_asof(eta_df.sort_values("created_at"),
+                                   fl_df.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("2min"))
+            eta_df = pd.merge_asof(eta_df.sort_values("created_at"),
+                                   dni_strang_df.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("65min"),
+                                   direction="nearest")
+            eta_df = eta_df.dropna(subset=["t_out","t_in","flow","dni_strang"])
+            if not eta_df.empty:
+                eta_df["dT_coll"] = (eta_df["t_out"] - eta_df["t_in"]).abs()
+                eta_df["p_coll"]  = eta_df["flow"] / 3600 * RHO * CP * eta_df["dT_coll"] / 1000
+                eta_df = eta_df.sort_values("created_at")
+                eta_df["dt_h"]   = eta_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
+                eta_df["e_coll"] = eta_df["p_coll"]     * eta_df["dt_h"]
+                eta_df["e_in"]   = eta_df["dni_strang"] * APERTURE / 1000 * eta_df["dt_h"]
+                eta_df["strang_hour"] = eta_df["created_at"].dt.floor("1h")
+                hourly_eta = eta_df.groupby("strang_hour").agg(
+                    e_coll=("e_coll","sum"), e_in=("e_in","sum"),
+                    dni_mean=("dni_strang","mean"),
+                    p_mean=("p_coll","mean"),
+                    flow_mean=("flow","mean"),
+                    n=("flow","count")
+                ).reset_index()
+                hourly_eta = hourly_eta[
+                    (hourly_eta["dni_mean"]  > 300) &
+                    (hourly_eta["p_mean"]    > 0.5) &
+                    (hourly_eta["flow_mean"] > 0.05) &
+                    (hourly_eta["n"]         > 10)
+                ].copy()
+                hourly_eta["eta_h"] = hourly_eta["e_coll"] / \
+                    hourly_eta["e_in"].replace(0, float("nan"))
+                hourly_eta = hourly_eta[
+                    (hourly_eta["eta_h"] >= 0.10) &
+                    (hourly_eta["eta_h"] <= 0.90)
+                ]
+                if not hourly_eta.empty:
+                    eta_df = eta_df.merge(
+                        hourly_eta[["strang_hour","eta_h"]], on="strang_hour", how="inner")
+                    eta_df["eta_raw"] = eta_df["eta_h"]
+                    eta_df["ghi_s"]   = eta_df["dni_strang"]
+                    eta_clear = eta_df[
+                        (eta_df["flow"] > 0.05) & (eta_df["p_coll"] > 0.3)
                     ].copy()
-                    hourly_eta["eta_h"] = hourly_eta["e_out"] / \
-                        hourly_eta["e_in"].replace(0, float("nan"))
-                    hourly_eta = hourly_eta[
-                        (hourly_eta["eta_h"] >= 0.10) &
-                        (hourly_eta["eta_h"] <= 0.90)
-                    ]
-                    if not hourly_eta.empty:
-                        eta_df = eta_df.merge(
-                            hourly_eta[["strang_hour","eta_h"]], on="strang_hour", how="inner")
-                        eta_df["eta_raw"] = eta_df["eta_h"]
-                        eta_df["ghi_s"]   = eta_df["dni_strang"]
-                        eta_clear = eta_df[eta_df["p_meas"] > 1.0].copy()
         # Compute η statistics from qualifying samples
         if not eta_clear.empty:
             eta_median = float(eta_clear["eta_raw"].median())
@@ -1471,10 +1489,10 @@ if is_internal and tab_smhi is not None:
                 f"n={n_pts} samples</span>"
                 f"</div>"
                 f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
-                f"* p90 = 90th percentile — representative peak, filters top 10% noise. "
-                f"η = P_kW ÷ (DNI_est × {APERTURE} m²). "
-                f"DNI_est = kt_STRÅNG × GHI_sensor (±10–15%). "
-                f"LC12 manufacturer spec: η_peak ≈ 0.72."
+                 f"* η = flow × (T_coll_out − T_coll_in) × cp ÷ (DNI_STRÅNG × {APERTURE} m²). "
+                 f"Hourly integration — thermal mass effects eliminated. "
+                 f"T_right = collector outlet, T_left = collector inlet. "
+                 f"LC12 manufacturer spec: η_peak ≈ 0.72."
                 f"</div></div>",
                 unsafe_allow_html=True
             )
