@@ -12,6 +12,31 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import os, requests
 
+def send_alert_email(age_min: float):
+    """Send email alert when data stops arriving. Uses Gmail SMTP."""
+    import smtplib
+    from email.mime.text import MIMEText
+    try:
+        gmail_user = st.secrets.get("ALERT_GMAIL_USER", "")
+        gmail_pass = st.secrets.get("ALERT_GMAIL_APP_PASSWORD", "")
+        if not gmail_user or not gmail_pass:
+            return  # Not configured — fail silently
+        msg = MIMEText(
+            f"⚠️ Helixis LC Monitor — No data received\n\n"
+            f"Last data: {age_min:.0f} minutes ago\n"
+            f"System may have lost MQTT connection.\n\n"
+            f"Check the MQTT broker and sensor gateway at Eket, Örkelljunga.",
+            "plain", "utf-8"
+        )
+        msg["Subject"] = f"⚠️ Helixis: No sensor data for {age_min:.0f} min"
+        msg["From"]    = gmail_user
+        msg["To"]      = "mats@helixis.se, eugene@helixis.se"
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_pass)
+            server.send_message(msg)
+    except Exception:
+        pass  # Never crash the app due to email failure
+
 st.set_page_config(page_title="Helixis LC Monitor", page_icon="🌀",
                    layout="wide", initial_sidebar_state="collapsed")
 
@@ -582,6 +607,24 @@ with tab_live:
             f'<span class="ts-text">{last_swe.strftime("%H:%M:%S")} '
             f'{"· LIVE" if is_live else f"· {age_min:.0f} min sedan"}</span>',
             unsafe_allow_html=True)
+
+        # ── Test email button (temporary) ───────────────────
+        if st.button("📧 Test alert email", key="test_email"):
+            send_alert_email(99)
+            st.success("Test email sent to mats@helixis.se & eugene@helixis.se")
+
+        # Email alert if data has been missing for 30–31 min (fires once per gap)
+        # Uses a narrow window to avoid repeat emails every 30s
+        if not is_live and 30 <= age_min < 31:
+            alert_key = f"alert_sent_{last_ts.date()}"
+            if not st.session_state.get(alert_key):
+                send_alert_email(age_min)
+                st.session_state[alert_key] = True
+        elif is_live:
+            # Reset alert state when data returns
+            for k in list(st.session_state.keys()):
+                if k.startswith("alert_sent_"):
+                    del st.session_state[k]
 
         df_today_pwr  = fetch_today_power()
         energy_today  = integrate_power(df_today_pwr)
