@@ -1255,20 +1255,71 @@ if is_internal and tab_smhi is not None:
         _swe = _pytz.timezone("Europe/Stockholm")
         _now_swe = datetime.now(_swe)
         _today   = _now_swe.date()
-        _default_from = _today - pd.Timedelta(days=2)
 
-        dc1, dc2 = st.columns(2)
-        with dc1:
-            date_from = st.date_input("From", value=_default_from,
-                                      max_value=_today, key="smhi_from")
-        with dc2:
-            date_to = st.date_input("To", value=_today,
-                                    max_value=_today, key="smhi_to")
+        # ── Day toggle buttons — last 7 days ──────────────────
+        # Session state: set of selected dates
+        if "smhi_selected_days" not in st.session_state:
+            # Default: all 7 days selected
+            st.session_state.smhi_selected_days = {
+                _today - pd.Timedelta(days=i) for i in range(7)
+            }
 
-        if date_from > date_to:
-            date_to = date_from  # single day — to = from
+        # Show buttons for last 14 days, grouped in rows of 7
+        st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+                    f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px'>"
+                    f"Select days for analysis</div>", unsafe_allow_html=True)
 
-        # Convert to UTC — from = start of day, to = end of day
+        # Row 1: last 7 days
+        day_cols = st.columns(7)
+        for i, col in enumerate(day_cols):
+            d = _today - pd.Timedelta(days=6-i)
+            label = d.strftime("%a\n%d %b")
+            selected = d in st.session_state.smhi_selected_days
+            if col.button(label,
+                          key=f"day_{d}",
+                          type="primary" if selected else "secondary",
+                          use_container_width=True):
+                if selected:
+                    st.session_state.smhi_selected_days.discard(d)
+                else:
+                    st.session_state.smhi_selected_days.add(d)
+                st.rerun()
+
+        # Expand to older dates
+        with st.expander("← Older dates"):
+            old_cols = st.columns(7)
+            for i, col in enumerate(old_cols):
+                d = _today - pd.Timedelta(days=13-i)
+                label = d.strftime("%a\n%d %b")
+                selected = d in st.session_state.smhi_selected_days
+                if col.button(label,
+                              key=f"day_old_{d}",
+                              type="primary" if selected else "secondary",
+                              use_container_width=True):
+                    if selected:
+                        st.session_state.smhi_selected_days.discard(d)
+                    else:
+                        st.session_state.smhi_selected_days.add(d)
+                    st.rerun()
+
+        # Quick actions
+        qa1, qa2, qa3 = st.columns([1,1,3])
+        if qa1.button("Select all", key="sel_all", use_container_width=True):
+            st.session_state.smhi_selected_days = {_today - pd.Timedelta(days=i) for i in range(14)}
+            st.rerun()
+        if qa2.button("Clear all", key="sel_none", use_container_width=True):
+            st.session_state.smhi_selected_days = set()
+            st.rerun()
+
+        # Derive date_from / date_to from selected days
+        selected_days = sorted(st.session_state.smhi_selected_days)
+        if not selected_days:
+            st.info("Select at least one day above.")
+            st.stop()
+        date_from = selected_days[0]
+        date_to   = selected_days[-1]
+
+        # Convert to UTC — from = start of first day, to = end of last day
         dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
         dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
         h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
