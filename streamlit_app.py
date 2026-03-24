@@ -1252,8 +1252,11 @@ Ratio M1/M2 reveals the actual cp of the fluid.
             values="value", aggfunc="last"
         ).reset_index().sort_values("created_at", ascending=False)
         st.dataframe(piv2.head(500), use_container_width=True)
+        _fname = (f"helixis_{_sel_days[0].strftime('%Y%m%d')}"
+                  f"_to_{_sel_days[-1].strftime('%Y%m%d')}.csv"
+                  if _sel_days else "helixis_export.csv")
         st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
-            f"helixis_{hours}h.csv", "text/csv")
+            _fname, "text/csv")
 
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
