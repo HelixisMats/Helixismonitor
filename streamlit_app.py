@@ -209,6 +209,25 @@ def fetch_history(hours_back: int) -> pd.DataFrame:
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df.sort_values("created_at")
 
+@st.cache_data(ttl=1800)
+def fetch_history_range(date_from, date_to) -> pd.DataFrame:
+    """Fetch a specific date range. Cached 30 min — fast for historical analysis."""
+    rows, psize, offset = [], 1000, 0
+    try:
+        while True:
+            res = db.table("sensor_readings").select("created_at,sensor,value")                 .gte("created_at", date_from.isoformat())                 .lte("created_at", date_to.isoformat())                 .order("created_at", desc=False)                 .range(offset, offset+psize-1).execute()
+            batch = res.data
+            if not batch: break
+            rows.extend(batch)
+            if len(batch) < psize: break
+            offset += psize
+    except Exception as e:
+        st.error(f"DB: {e}"); return pd.DataFrame()
+    if not rows: return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    return df.sort_values("created_at")
+
 @st.cache_data(ttl=60)
 def fetch_today_power() -> pd.DataFrame:
     """Fetch all power readings from midnight today — used for energy integration."""
@@ -1247,13 +1266,12 @@ if is_internal and tab_smhi is not None:
                                     max_value=_today, key="smhi_to")
 
         if date_from > date_to:
-            st.warning("'From' must be before 'To'")
-            date_from = date_to
+            date_to = date_from  # single day — to = from
 
-        # Convert to UTC datetimes for filtering
+        # Convert to UTC — from = start of day, to = end of day
         dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
         dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
-        h_cmp   = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 24)
+        h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
         with col_l:
@@ -1322,12 +1340,8 @@ if is_internal and tab_smhi is not None:
         st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
                     unsafe_allow_html=True)
 
-        df_cmp_all = fetch_history(h_cmp)
-        # Filter sensor data to selected date range
-        df_cmp = df_cmp_all[
-            (df_cmp_all["created_at"] >= dt_from) &
-            (df_cmp_all["created_at"] <= dt_to)
-        ].copy() if not df_cmp_all.empty else df_cmp_all
+        # Fetch only the selected date range — cached 30 min, fast for historical days
+        df_cmp = fetch_history_range(dt_from, dt_to)
 
         # All variables initialized — safe even if STRÅNG/sensor data is missing
         APERTURE = 12.35
