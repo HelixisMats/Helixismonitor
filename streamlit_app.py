@@ -610,8 +610,26 @@ with tab_live:
 
         # ── Test email button (temporary) ───────────────────
         if st.button("📧 Test alert email", key="test_email"):
-            send_alert_email(99)
-            st.success("Test email sent to mats@helixis.se & eugene@helixis.se")
+            import smtplib
+            from email.mime.text import MIMEText
+            gmail_user = st.secrets.get("ALERT_GMAIL_USER", "")
+            gmail_pass = st.secrets.get("ALERT_GMAIL_APP_PASSWORD", "")
+            if not gmail_user:
+                st.error("❌ ALERT_GMAIL_USER not found in Secrets")
+            elif not gmail_pass:
+                st.error("❌ ALERT_GMAIL_APP_PASSWORD not found in Secrets")
+            else:
+                try:
+                    msg = MIMEText("Test alert from Helixis LC Monitor.", "plain", "utf-8")
+                    msg["Subject"] = "✅ Helixis alert test"
+                    msg["From"]    = gmail_user
+                    msg["To"]      = "mats@helixis.se, eugene@helixis.se"
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                        server.login(gmail_user, gmail_pass)
+                        server.send_message(msg)
+                    st.success(f"✅ Email sent from {gmail_user}")
+                except Exception as e:
+                    st.error(f"❌ Failed: {e}")
 
         # Email alert if data has been missing for 30–31 min (fires once per gap)
         # Uses a narrow window to avoid repeat emails every 30s
