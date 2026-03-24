@@ -814,15 +814,101 @@ with tab_live:
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
-    # ── Tidsintervall ─────────────────────────────────────────
-    hours = st.selectbox("Tidsintervall",
-        [1, 6, 12, 24, 48, 168], index=3,
-        format_func=lambda h: f"{h}h" if h < 24 else
-            (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"))
+    import pytz as _hpytz
+    _hswe   = _hpytz.timezone("Europe/Stockholm")
+    _htoday = datetime.now(_hswe).date()
 
-    with st.spinner(T["loading_hist"]):
-        df_hist = fetch_history(hours)
-        df_smhi_h = fetch_smhi_history(hours)   # SMHI station data for same period
+    # ── Load once, filter locally — no DB call on every button click ──
+    if "hist_df_loaded" not in st.session_state:
+        st.session_state.hist_df_loaded = False
+
+    load_col, info_col = st.columns([1, 3])
+    with load_col:
+        if st.button("🔄 Load / Refresh", key="hist_load", use_container_width=True):
+            fetch_history_range.clear()
+            fetch_smhi_history.clear()
+            st.session_state.hist_df_loaded = False
+
+    if not st.session_state.hist_df_loaded:
+        with st.spinner("Loading 14 days from database…"):
+            _dt_from14 = datetime.combine(
+                _htoday - pd.Timedelta(days=13),
+                datetime.min.time()).replace(tzinfo=_hswe).astimezone(timezone.utc)
+            _dt_to14 = datetime.combine(
+                _htoday, datetime.max.time()).replace(tzinfo=_hswe).astimezone(timezone.utc)
+            st.session_state.hist_df_all   = fetch_history_range(_dt_from14, _dt_to14)
+            st.session_state.hist_smhi_all = fetch_smhi_history(14 * 24)
+            st.session_state.hist_df_loaded = True
+
+    df_all_hist = st.session_state.get("hist_df_all",  pd.DataFrame())
+    df_smhi_all = st.session_state.get("hist_smhi_all", pd.DataFrame())
+
+    with info_col:
+        if not df_all_hist.empty:
+            _ht0 = df_all_hist["created_at"].min().astimezone(_hswe).strftime("%b %d")
+            _ht1 = df_all_hist["created_at"].max().astimezone(_hswe).strftime("%b %d %H:%M")
+            st.caption(f"Loaded: {_ht0} → {_ht1} · {len(df_all_hist):,} rows · filtering locally")
+
+    # ── Day toggle buttons ──────────────────────────────────────
+    if "hist_selected_days" not in st.session_state:
+        st.session_state.hist_selected_days = {
+            _htoday - pd.Timedelta(days=i) for i in range(7)
+        }
+
+    st.markdown(
+        f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+        f"text-transform:uppercase;letter-spacing:.08em;margin:8px 0 6px'>"
+        f"Select days</div>", unsafe_allow_html=True)
+
+    hday_cols = st.columns(7)
+    for i, col in enumerate(hday_cols):
+        d = _htoday - pd.Timedelta(days=6-i)
+        label = d.strftime("%a") + "\n" + d.strftime("%d %b")
+        sel = d in st.session_state.hist_selected_days
+        if col.button(label, key=f"hday_{d}",
+                      type="primary" if sel else "secondary",
+                      use_container_width=True):
+            if sel: st.session_state.hist_selected_days.discard(d)
+            else:   st.session_state.hist_selected_days.add(d)
+            st.rerun()
+
+    with st.expander("← Older dates"):
+        hday_cols2 = st.columns(7)
+        for i, col in enumerate(hday_cols2):
+            d = _htoday - pd.Timedelta(days=13-i)
+            label = d.strftime("%a") + "\n" + d.strftime("%d %b")
+            sel = d in st.session_state.hist_selected_days
+            if col.button(label, key=f"hday_old_{d}",
+                          type="primary" if sel else "secondary",
+                          use_container_width=True):
+                if sel: st.session_state.hist_selected_days.discard(d)
+                else:   st.session_state.hist_selected_days.add(d)
+                st.rerun()
+
+    hqa1, hqa2, _ = st.columns([1, 1, 4])
+    if hqa1.button("Select all", key="hsel_all", use_container_width=True):
+        st.session_state.hist_selected_days = {_htoday - pd.Timedelta(days=i) for i in range(14)}
+        st.rerun()
+    if hqa2.button("Clear", key="hsel_none", use_container_width=True):
+        st.session_state.hist_selected_days = set()
+        st.rerun()
+
+    # Filter loaded data to selected days
+    _sel_days = sorted(st.session_state.hist_selected_days)
+    if not _sel_days or df_all_hist.empty:
+        st.info("Select at least one day, then click 🔄 Load / Refresh if no data shows.")
+        st.stop()
+
+    _hdt_from = datetime.combine(_sel_days[0],  datetime.min.time()).replace(tzinfo=_hswe).astimezone(timezone.utc)
+    _hdt_to   = datetime.combine(_sel_days[-1], datetime.max.time()).replace(tzinfo=_hswe).astimezone(timezone.utc)
+    df_hist   = df_all_hist[
+        (df_all_hist["created_at"] >= _hdt_from) &
+        (df_all_hist["created_at"] <= _hdt_to)
+    ].copy()
+    df_smhi_h = df_smhi_all[
+        (df_smhi_all["created_at"] >= _hdt_from) &
+        (df_smhi_all["created_at"] <= _hdt_to)
+    ].copy() if not df_smhi_all.empty else pd.DataFrame()
 
     if df_hist.empty:
         st.warning(T["no_data_interval"])
@@ -1485,6 +1571,22 @@ if is_internal and tab_smhi is not None:
                         hourly_eta[["strang_hour","eta_h"]], on="strang_hour", how="inner")
                     eta_df["eta_raw"] = eta_df["eta_h"]
                     eta_df["ghi_s"]   = eta_df["dni_strang"]
+                    # Compute startup_min after merge (merge resets index/columns)
+                    eta_df = eta_df.sort_values("created_at").reset_index(drop=True)
+                    eta_df["flow_on"]    = eta_df["flow"] > 0.05
+                    eta_df["flow_start"] = (eta_df["flow_on"] &
+                        ~eta_df["flow_on"].shift(1, fill_value=False))
+                    eta_df["startup_min"] = 0.0
+                    _stt = None
+                    for _idx in eta_df.index:
+                        if eta_df.loc[_idx, "flow_start"]:
+                            _stt = eta_df.loc[_idx, "created_at"]
+                        if _stt is not None and eta_df.loc[_idx, "flow_on"]:
+                            eta_df.loc[_idx, "startup_min"] = (
+                                eta_df.loc[_idx, "created_at"] - _stt
+                            ).total_seconds() / 60
+                        else:
+                            _stt = None
                     eta_clear = eta_df[
                         (eta_df["flow"]        > 0.05) &
                         (eta_df["p_coll"]      > 0.3) &
