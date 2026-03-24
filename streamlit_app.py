@@ -1231,13 +1231,29 @@ if is_internal and tab_smhi is not None:
     *Sources: SMHI STRÅNG Open Data · Helsingborg station 62040 (temp/wind/humidity) · Växjö station 64565 (GHI station)*
     """)
 
-        # ── Hämta data ────────────────────────────────────────────
-        h_cmp = st.selectbox(T["analysis_period"],
-                              [6, 12, 24, 36, 48, 72, 96, 120, 168, 240, 336],
-                              index=4,
-                              format_func=lambda h: (f"{h}h" if h < 24 else
-                                  f"{h//24}d" + (f" {h%24}h" if h%24 else "")),
-                              key="smhi_h")
+        # ── Datumväljare ──────────────────────────────────────────
+        import pytz as _pytz
+        _swe = _pytz.timezone("Europe/Stockholm")
+        _now_swe = datetime.now(_swe)
+        _today   = _now_swe.date()
+        _default_from = _today - pd.Timedelta(days=2)
+
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            date_from = st.date_input("From", value=_default_from,
+                                      max_value=_today, key="smhi_from")
+        with dc2:
+            date_to = st.date_input("To", value=_today,
+                                    max_value=_today, key="smhi_to")
+
+        if date_from > date_to:
+            st.warning("'From' must be before 'To'")
+            date_from = date_to
+
+        # Convert to UTC datetimes for filtering
+        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        h_cmp   = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
         with col_l:
@@ -1245,7 +1261,7 @@ if is_internal and tab_smhi is not None:
                 smhi_data, smhi_errors = fetch_smhi_and_store()
         with col_r:
             with st.spinner(T["loading_strang"]):
-                days_back = max(1, h_cmp // 24 + 1)
+                days_back = max(1, (date_to - date_from).days + 2)
                 df_strang, strang_errors = fetch_strang(days_back)
 
         if smhi_errors:
@@ -1306,7 +1322,12 @@ if is_internal and tab_smhi is not None:
         st.markdown('<div class="section-title">STRÅNG model — DNI & clearness index kt</div>',
                     unsafe_allow_html=True)
 
-        df_cmp = fetch_history(h_cmp)
+        df_cmp_all = fetch_history(h_cmp)
+        # Filter sensor data to selected date range
+        df_cmp = df_cmp_all[
+            (df_cmp_all["created_at"] >= dt_from) &
+            (df_cmp_all["created_at"] <= dt_to)
+        ].copy() if not df_cmp_all.empty else df_cmp_all
 
         # All variables initialized — safe even if STRÅNG/sensor data is missing
         APERTURE = 12.35
@@ -1318,14 +1339,12 @@ if is_internal and tab_smhi is not None:
         pwr_live = df_cmp[df_cmp["sensor"]=="power"].sort_values("created_at")
         p_actual = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
 
-        # Clip STRÅNG to actual sensor window
+        # Clip STRÅNG to selected date range
         df_st = pd.DataFrame()
-        if not df_strang.empty and not irr_live.empty:
-            s_t0 = irr_live["created_at"].min()
-            s_t1 = irr_live["created_at"].max()
+        if not df_strang.empty:
             df_st = df_strang[
-                (df_strang["created_at"] >= s_t0) &
-                (df_strang["created_at"] <= s_t1)
+                (df_strang["created_at"] >= dt_from) &
+                (df_strang["created_at"] <= dt_to)
             ].copy()
 
         # Use STRÅNG DNI directly — skip kt=DNI/GHI which breaks when GHI_STRÅNG≈0
@@ -1354,15 +1373,34 @@ if is_internal and tab_smhi is not None:
                     direction="nearest")
                 eta_df = eta_df.dropna(subset=["p_meas","dni_strang"])
                 if not eta_df.empty:
-                    denom = (eta_df["dni_strang"] * APERTURE / 1000).replace(0, float("nan"))
-                    eta_df["eta_raw"] = eta_df["p_meas"] / denom
-                    eta_df["ghi_s"]   = eta_df["dni_strang"]
-                    eta_clear = eta_df[
-                        (eta_df["dni_strang"] > 300) &
-                        (eta_df["p_meas"]     > 1.0) &
-                        (eta_df["eta_raw"]    >= 0.10) &
-                        (eta_df["eta_raw"]    <= 0.90)
+                    # Hourly integration — avoids thermal mass distortion
+                    eta_df = eta_df.sort_values("created_at")
+                    eta_df["dt_h"] = eta_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
+                    eta_df["e_out"] = eta_df["p_meas"] * eta_df["dt_h"]
+                    eta_df["e_in"]  = eta_df["dni_strang"] * APERTURE / 1000 * eta_df["dt_h"]
+                    eta_df["strang_hour"] = eta_df["created_at"].dt.floor("1h")
+                    hourly_eta = eta_df.groupby("strang_hour").agg(
+                        e_out=("e_out","sum"), e_in=("e_in","sum"),
+                        dni_mean=("dni_strang","mean"), p_mean=("p_meas","mean"),
+                        n=("p_meas","count")
+                    ).reset_index()
+                    hourly_eta = hourly_eta[
+                        (hourly_eta["dni_mean"] > 300) &
+                        (hourly_eta["p_mean"]   > 1.0) &
+                        (hourly_eta["n"]        > 10)
                     ].copy()
+                    hourly_eta["eta_h"] = hourly_eta["e_out"] / \
+                        hourly_eta["e_in"].replace(0, float("nan"))
+                    hourly_eta = hourly_eta[
+                        (hourly_eta["eta_h"] >= 0.10) &
+                        (hourly_eta["eta_h"] <= 0.90)
+                    ]
+                    if not hourly_eta.empty:
+                        eta_df = eta_df.merge(
+                            hourly_eta[["strang_hour","eta_h"]], on="strang_hour", how="inner")
+                        eta_df["eta_raw"] = eta_df["eta_h"]
+                        eta_df["ghi_s"]   = eta_df["dni_strang"]
+                        eta_clear = eta_df[eta_df["p_meas"] > 1.0].copy()
         # Compute η statistics from qualifying samples
         if not eta_clear.empty:
             eta_median = float(eta_clear["eta_raw"].median())
@@ -1586,13 +1624,16 @@ if is_internal and tab_smhi is not None:
         if not df_st.empty and not dni_strang_df.empty:
             st.markdown('<div class="section-title">Clearness index kt over time</div>',
                         unsafe_allow_html=True)
-            # Compute kt = DNI_STRÅNG / GHI_sensor at matched timestamps
+            # Compute kt = DNI_STRÅNG / GHI_sensor — only when sun is clearly up
+            # Filter GHI > 150 to avoid division noise at dawn/dusk
             kt_combo = pd.merge_asof(
-                irr_all[irr_all["ghi"] > 50].sort_values("created_at"),
+                irr_all[irr_all["ghi"] > 150].sort_values("created_at"),
                 dni_strang_df.sort_values("created_at"),
                 on="created_at", tolerance=pd.Timedelta("65min"), direction="nearest")
             kt_combo = kt_combo.dropna()
-            kt_combo["kt"] = (kt_combo["dni_strang"] / kt_combo["ghi"]).clip(0, 2)
+            # kt physically 0–1.5 max; clip and filter outliers
+            kt_combo["kt"] = kt_combo["dni_strang"] / kt_combo["ghi"]
+            kt_combo = kt_combo[(kt_combo["kt"] >= 0) & (kt_combo["kt"] <= 1.5)]
             fig_kt = go.Figure()
             fig_kt.add_trace(go.Scatter(
                 x=kt_combo["created_at"], y=kt_combo["kt"],
