@@ -678,7 +678,7 @@ with tab_live:
                 render_echarts_gauge(T["pressure"], pres, 0, 6, "bar",
                     green_end=4.5, warn_start=5.2, mode="limit", key="g_pres")
 
-            # ── Energy (HTML tiles) ──
+            # ── Energy (tiles + bar charts) ──
             st.markdown(f'<div class="section-title">{T["energy"]}</div>',
                         unsafe_allow_html=True)
             render_tiles([
@@ -686,6 +686,66 @@ with tab_live:
                 (T["heat_total"],   mwh_to_kwh(v.get("heat_energy")), "kWh", 0, 9999, BLUE, 3, None),
                 (T["delta_t"],      v.get("temp_difference"), "°C",  0, 50,   BLUE, 2, None),
             ])
+
+            # ── Hourly & Daily energy bar charts ──────────────
+            df_7d = fetch_history(168)  # 7 days for daily bars
+            if not df_7d.empty:
+                pwr_all = df_7d[df_7d["sensor"]=="power"][["created_at","value"]].copy()
+                pwr_all = pwr_all.sort_values("created_at")
+                pwr_all["dt_h"] = pwr_all["created_at"].diff().dt.total_seconds().fillna(0) / 3600
+                pwr_all["e_kwh"] = pwr_all["value"] * pwr_all["dt_h"]
+
+                # Hourly — today only
+                import pytz
+                swe = pytz.timezone("Europe/Stockholm")
+                pwr_all["ts_swe"] = pwr_all["created_at"].dt.tz_convert(swe)
+                today_str = pd.Timestamp.now(tz=swe).date()
+                pwr_today = pwr_all[pwr_all["ts_swe"].dt.date == today_str].copy()
+
+                ch1, ch2 = st.columns(2)
+
+                with ch1:
+                    st.markdown(f"<div style='font-size:.75rem;font-weight:600;color:{MUTED};"
+                                f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                                f"Hourly energy today (kWh)</div>", unsafe_allow_html=True)
+                    if not pwr_today.empty:
+                        hourly = pwr_today.groupby(pwr_today["ts_swe"].dt.hour)["e_kwh"].sum().reset_index()
+                        hourly.columns = ["hour","kwh"]
+                        hourly["label"] = hourly["hour"].apply(lambda h: f"{h:02d}:00")
+                        fig_h = go.Figure(go.Bar(
+                            x=hourly["label"], y=hourly["kwh"].round(3),
+                            marker_color=TEAL, text=hourly["kwh"].round(2),
+                            textposition="outside", textfont=dict(size=9, color=MUTED)))
+                        fig_h.update_layout(
+                            height=220, margin=dict(l=0,r=0,t=10,b=30),
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            yaxis=dict(gridcolor=BORDER, color=MUTED, title="kWh"),
+                            xaxis=dict(color=MUTED, showgrid=False),
+                            font=dict(family="Inter", color=MUTED))
+                        st.plotly_chart(fig_h, use_container_width=True,
+                            config={"displayModeBar": False})
+                    else:
+                        st.caption("No data for today yet")
+
+                with ch2:
+                    st.markdown(f"<div style='font-size:.75rem;font-weight:600;color:{MUTED};"
+                                f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                                f"Daily energy — last 7 days (kWh)</div>", unsafe_allow_html=True)
+                    daily = pwr_all.groupby(pwr_all["ts_swe"].dt.date)["e_kwh"].sum().reset_index()
+                    daily.columns = ["date","kwh"]
+                    daily["label"] = pd.to_datetime(daily["date"]).dt.strftime("%b %d")
+                    fig_d = go.Figure(go.Bar(
+                        x=daily["label"], y=daily["kwh"].round(1),
+                        marker_color=BLUE, text=daily["kwh"].round(1),
+                        textposition="outside", textfont=dict(size=9, color=MUTED)))
+                    fig_d.update_layout(
+                        height=220, margin=dict(l=0,r=0,t=10,b=30),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        yaxis=dict(gridcolor=BORDER, color=MUTED, title="kWh"),
+                        xaxis=dict(color=MUTED, showgrid=False),
+                        font=dict(family="Inter", color=MUTED))
+                    st.plotly_chart(fig_d, use_container_width=True,
+                        config={"displayModeBar": False})
 
         else:
             # ── Compact tile view ──
