@@ -1400,6 +1400,9 @@ if is_internal and tab_smhi is not None:
         ETA_OPT = 0.65; merged = pd.DataFrame()
         eta_clear = pd.DataFrame(); eta_df = pd.DataFrame()
         eta_median = eta_p90 = eta_p95 = eta_max = None; n_pts = 0
+        # System η (forward/return) — parallel calculation
+        sys_clear = pd.DataFrame()
+        sys_median = sys_p90 = sys_p95 = None; sys_pts = 0
         irr_live = df_cmp[df_cmp["sensor"]=="irradiance"].sort_values("created_at")
         pwr_live = df_cmp[df_cmp["sensor"]=="power"].sort_values("created_at")
         p_actual = float(pwr_live["value"].iloc[-1]) if not pwr_live.empty else None
@@ -1494,6 +1497,54 @@ if is_internal and tab_smhi is not None:
             ETA_OPT    = float(max(0.10, min(0.85, eta_p90)))
             p_theoretical = (dni_est_current * APERTURE * ETA_OPT) / 1000 \
                 if dni_est_current is not None else None
+
+        # ── System η: T_forward / T_return ────────────────────
+        tf_df  = df_cmp[df_cmp["sensor"]=="temp_forward"][["created_at","value"]].rename(columns={"value":"t_fwd"})
+        tr2_df = df_cmp[df_cmp["sensor"]=="temp_return"][["created_at","value"]].rename(columns={"value":"t_ret"})
+        fl_df2 = df_cmp[df_cmp["sensor"]=="flow"][["created_at","value"]].rename(columns={"value":"flow"})
+
+        if not tf_df.empty and not tr2_df.empty and not fl_df2.empty and not dni_strang_df.empty:
+            sys_df = pd.merge_asof(tf_df.sort_values("created_at"),
+                                   tr2_df.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("2min"))
+            sys_df = pd.merge_asof(sys_df.sort_values("created_at"),
+                                   fl_df2.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("2min"))
+            sys_df = pd.merge_asof(sys_df.sort_values("created_at"),
+                                   dni_strang_df.sort_values("created_at"),
+                                   on="created_at", tolerance=pd.Timedelta("65min"),
+                                   direction="nearest")
+            sys_df = sys_df.dropna(subset=["t_fwd","t_ret","flow","dni_strang"])
+            if not sys_df.empty:
+                sys_df["dT_sys"] = (sys_df["t_fwd"] - sys_df["t_ret"]).abs()
+                sys_df["p_sys"]  = sys_df["flow"] / 3600 * RHO * CP * sys_df["dT_sys"] / 1000
+                sys_df = sys_df.sort_values("created_at")
+                sys_df["dt_h"]  = sys_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
+                sys_df["e_sys"] = sys_df["p_sys"]      * sys_df["dt_h"]
+                sys_df["e_in"]  = sys_df["dni_strang"] * APERTURE / 1000 * sys_df["dt_h"]
+                sys_df["strang_hour"] = sys_df["created_at"].dt.floor("1h")
+                h_sys = sys_df.groupby("strang_hour").agg(
+                    e_sys=("e_sys","sum"), e_in=("e_in","sum"),
+                    dni_mean=("dni_strang","mean"),
+                    p_mean=("p_sys","mean"), flow_mean=("flow","mean"),
+                    n=("flow","count")
+                ).reset_index()
+                h_sys = h_sys[
+                    (h_sys["dni_mean"]  > 300) & (h_sys["p_mean"]    > 0.5) &
+                    (h_sys["flow_mean"] > 0.05) & (h_sys["n"]        > 10)
+                ].copy()
+                h_sys["eta_h"] = h_sys["e_sys"] / h_sys["e_in"].replace(0, float("nan"))
+                h_sys = h_sys[(h_sys["eta_h"] >= 0.05) & (h_sys["eta_h"] <= 0.90)]
+                if not h_sys.empty:
+                    sys_df = sys_df.merge(h_sys[["strang_hour","eta_h"]], on="strang_hour", how="inner")
+                    sys_df["eta_raw"] = sys_df["eta_h"]
+                    sys_clear = sys_df[(sys_df["flow"] > 0.05) & (sys_df["p_sys"] > 0.3)].copy()
+
+        if not sys_clear.empty:
+            sys_median = float(sys_clear["eta_raw"].median())
+            sys_p90    = float(sys_clear["eta_raw"].quantile(0.90))
+            sys_p95    = float(sys_clear["eta_raw"].quantile(0.95))
+            sys_pts    = len(sys_clear)
         # ── kt tiles ──────────────────────────────────────
         kt_color = TEAL if kt_current and kt_current > 0.6 else (AMBER if kt_current and kt_current > 0.3 else MUTED)
         efficiency_pct = (p_actual / p_theoretical * 100)                 if p_theoretical and p_theoretical > 0.1 and p_actual else None
@@ -1522,31 +1573,51 @@ if is_internal and tab_smhi is not None:
         st.markdown('<div class="section-title">Optical efficiency η* over time</div>',
                     unsafe_allow_html=True)
 
-        if eta_p90 is not None and n_pts > 5:
-            eta_color = TEAL if eta_p90 > 0.62 else (AMBER if eta_p90 > 0.45 else RUST)
+        if eta_p90 is not None and n_pts > 5 or sys_p90 is not None and sys_pts > 5:
+            ec1, ec2 = st.columns(2)
 
-            # Headline metric card
-            st.markdown(
-                f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
-                f"border-left:3px solid {eta_color};margin:4px 0 12px'>"
-                f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};text-transform:uppercase;"
-                f"letter-spacing:.08em;margin-bottom:4px'>Peak optical efficiency η* (p90, correlated)</div>"
-                f"<div style='display:flex;align-items:baseline;gap:16px;flex-wrap:wrap'>"
-                f"<span style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}</span>"
-                f"<span style='font-size:.85rem;color:{MUTED}'>"
-                f"median {eta_median:.3f} &nbsp;·&nbsp; "
-                f"p95 {eta_p95:.3f} &nbsp;·&nbsp; "
-                f"max {eta_max:.3f} &nbsp;·&nbsp; "
-                f"n={n_pts} samples</span>"
-                f"</div>"
-                f"<div style='font-size:.72rem;color:{MUTED};margin-top:5px;line-height:1.5'>"
-                 f"* η = flow × (T_coll_out − T_coll_in) × cp ÷ (DNI_STRÅNG × {APERTURE} m²). "
-                 f"Hourly integration — thermal mass effects eliminated. "
-                 f"T_right = collector outlet, T_left = collector inlet. "
-                 f"LC12 manufacturer spec: η_peak ≈ 0.72."
-                f"</div></div>",
-                unsafe_allow_html=True
-            )
+            # Collector η card
+            with ec1:
+                eta_color = TEAL if (eta_p90 or 0) > 0.62 else (AMBER if (eta_p90 or 0) > 0.45 else RUST)
+                if eta_p90 is not None and n_pts > 5:
+                    st.markdown(
+                        f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
+                        f"border-left:3px solid {eta_color};height:100%'>"
+                        f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};"
+                        f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                        f"η Collector (T_right − T_left)*</div>"
+                        f"<div style='font-size:2.2rem;font-weight:700;color:{eta_color}'>{eta_p90:.3f}"
+                        f"<span style='font-size:.8rem;font-weight:400;color:{MUTED};margin-left:6px'>p90</span></div>"
+                        f"<div style='font-size:.8rem;color:{MUTED};margin-top:2px'>"
+                        f"median {eta_median:.3f} · p95 {eta_p95:.3f} · n={n_pts}h</div>"
+                        f"<div style='font-size:.68rem;color:{MUTED};margin-top:4px;line-height:1.4'>"
+                        f"* Pure optical η — collector in/out only</div>"
+                        f"</div>", unsafe_allow_html=True)
+                else:
+                    st.info("Collector η: insufficient data")
+
+            # System η card
+            with ec2:
+                sys_color = TEAL if (sys_p90 or 0) > 0.55 else (AMBER if (sys_p90 or 0) > 0.35 else RUST)
+                if sys_p90 is not None and sys_pts > 5:
+                    st.markdown(
+                        f"<div style='background:{BG2};border-radius:8px;padding:12px 16px;"
+                        f"border-left:3px solid {sys_color};height:100%'>"
+                        f"<div style='font-size:.65rem;font-weight:600;color:{TEXT};"
+                        f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                        f"η System (T_forward − T_return)**</div>"
+                        f"<div style='font-size:2.2rem;font-weight:700;color:{sys_color}'>{sys_p90:.3f}"
+                        f"<span style='font-size:.8rem;font-weight:400;color:{MUTED};margin-left:6px'>p90</span></div>"
+                        f"<div style='font-size:.8rem;color:{MUTED};margin-top:2px'>"
+                        f"median {sys_median:.3f} · p95 {sys_p95:.3f} · n={sys_pts}h</div>"
+                        f"<div style='font-size:.68rem;color:{MUTED};margin-top:4px;line-height:1.4'>"
+                        f"** Includes pipe & HX losses — lower than collector η</div>"
+                        f"</div>", unsafe_allow_html=True)
+                else:
+                    st.info("System η: insufficient data")
+
+            st.caption(f"η = flow × ΔT × cp ÷ (DNI_STRÅNG × {APERTURE} m²) · "
+                       f"Hourly integration · LC12 spec η_peak ≈ 0.72")
 
             # Time series chart of η per measurement point
             fig_eta = go.Figure()
@@ -1591,8 +1662,23 @@ if is_internal and tab_smhi is not None:
             st.plotly_chart(fig_eta, use_container_width=True,
                 config={"scrollZoom": True, "displayModeBar": True,
                         "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
-            st.caption("Scatter = η at each measurement point · Teal line = rolling median · "
-                       "Variability reflects cloud transients, tracking jitter, startup, soiling.")
+            # System η scatter overlay
+            if not sys_clear.empty:
+                sys_sorted  = sys_clear.sort_values("created_at")
+                sys_rolling = sys_sorted["eta_raw"].rolling(10, min_periods=3, center=True).median()
+                fig_eta.add_trace(go.Scatter(
+                    x=sys_sorted["created_at"], y=sys_sorted["eta_raw"],
+                    name="η system (fwd/ret)",
+                    mode="markers",
+                    marker=dict(color=AMBER, size=4, opacity=0.4)))
+                fig_eta.add_trace(go.Scatter(
+                    x=sys_sorted["created_at"], y=sys_rolling,
+                    name="System rolling median",
+                    mode="lines",
+                    line=dict(color=AMBER, width=2, dash="dash")))
+
+            st.caption("Teal = collector η (T_right/T_left) · Amber dashed = system η (forward/return) · "
+                       "Gap between the two = pipe and heat exchanger losses.")
 
         else:
             # Debug info — show why no samples qualified
