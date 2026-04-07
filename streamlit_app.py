@@ -894,11 +894,6 @@ with tab_hist:
                 fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
                     name=names_map[s], mode="lines",
                     line=dict(width=1.8, color=cmap[s]), yaxis="y"))
-        sub_p = df_hist[df_hist["sensor"] == "pressure"]
-        if not sub_p.empty:
-            fig_temp.add_trace(go.Scatter(x=sub_p["created_at"], y=sub_p["value"],
-                name=T["pressure_lbl"], mode="lines",
-                line=dict(width=1.5, color=SLATE, dash="dot"), yaxis="y2"))
         # Outside temperature from SMHI (Helsingborg station)
         if not df_smhi_h.empty:
             sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
@@ -908,39 +903,45 @@ with tab_hist:
                     name="Outside temp (SMHI)", mode="lines",
                     line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
         fig_temp.update_layout(
-            height=320, margin=dict(l=0, r=50, t=10, b=0),
+            height=320, margin=dict(l=0, r=10, t=10, b=0),
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
             yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
                        tickfont=dict(color=TEXT), gridcolor=BORDER),
-            yaxis2=dict(title=dict(text="bar", font=dict(color=SLATE)),
-                        tickfont=dict(color=SLATE), overlaying="y", side="right",
-                        showgrid=False, range=[0, 8]),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
         )
         fig_temp.update_xaxes(showgrid=False, color=MUTED)
         st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-        # ── 3. ΔT & Flöde ─────────────────────────────────────
-        st.markdown('<div class="section-title">ΔT & Flöde</div>',
+        # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
+        st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
                     unsafe_allow_html=True)
         fig_dt = go.Figure()
-        for sensor, color, name, yaxis in [
-            ("temp_difference", TEXT,  "ΔT (°C)",    "y"),
-            ("flow",            SLATE, T["flow_lbl"], "y2"),
-        ]:
-            sub = df_hist[df_hist["sensor"] == sensor]
-            if not sub.empty:
-                fig_dt.add_trace(go.Scatter(
-                    x=sub["created_at"], y=sub["value"],
-                    name=name, mode="lines",
-                    line=dict(width=1.8, color=color),
-                    yaxis=yaxis,
-                ))
+        # Left axis: ΔT
+        sub_dt = df_hist[df_hist["sensor"] == "temp_difference"]
+        if not sub_dt.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_dt["created_at"], y=sub_dt["value"],
+                name="ΔT (°C)", mode="lines",
+                line=dict(width=1.8, color=TEXT), yaxis="y"))
+        # Right axis (inner): Flow m³/h
+        sub_fl = df_hist[df_hist["sensor"] == "flow"]
+        if not sub_fl.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_fl["created_at"], y=sub_fl["value"],
+                name=T["flow_lbl"], mode="lines",
+                line=dict(width=1.8, color=SLATE), yaxis="y2"))
+        # Right axis (outer): Pressure bar
+        sub_pr = df_hist[df_hist["sensor"] == "pressure"]
+        if not sub_pr.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_pr["created_at"], y=sub_pr["value"],
+                name=T["pressure_lbl"], mode="lines",
+                line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
         fig_dt.update_layout(
-            height=260, margin=dict(l=0, r=50, t=10, b=0),
+            height=280, margin=dict(l=0, r=90, t=10, b=0),
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=10, color=MUTED, family="Inter")),
@@ -948,7 +949,11 @@ with tab_hist:
                        tickfont=dict(color=TEXT), gridcolor=BORDER),
             yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
                         tickfont=dict(color=SLATE), overlaying="y", side="right",
-                        showgrid=False),
+                        showgrid=False, anchor="x"),
+            yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
+                        tickfont=dict(color=TEAL), overlaying="y", side="right",
+                        showgrid=False, anchor="free", position=1.0,
+                        range=[0, 8]),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
         )
