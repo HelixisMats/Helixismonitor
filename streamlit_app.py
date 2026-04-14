@@ -1321,8 +1321,8 @@ if is_internal and tab_smhi is not None:
         date_to   = selected_days[-1]
 
         # Convert to UTC — from = start of first day, to = end of last day
-        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
-        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
         h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
