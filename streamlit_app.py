@@ -859,7 +859,7 @@ with tab_live:
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
     # ── Översikt — välj period ────────────────────────────────
-    today = datetime.now(_swe).date()
+    today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
 
     df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
@@ -908,8 +908,8 @@ with tab_hist:
                                 min_value=date_from, max_value=today, key="hist_to")
 
     # Convert to UTC datetimes covering full days in Swedish time
-    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
-    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
+    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
     hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
     with st.spinner(T["loading_hist"]):
