@@ -231,39 +231,44 @@ def fetch_history_range(date_from, date_to) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
     """
-    Fetch daily aggregates for overview chart — one row per day per sensor.
-    Only pulls power + irradiance. Much lighter than raw data.
-    Cached 1 hour — used only for the coarse date-selection overview.
+    Fetch daily aggregates for overview chart.
+    Two separate small queries (power, irradiance) — avoids large payloads.
+    Cached 1 hour.
     """
+    import numpy as np
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings") \
-                .select("created_at,sensor,value") \
-                .in_("sensor", ["power", "irradiance"]) \
-                .gte("created_at", since) \
-                .order("created_at", desc=False) \
-                .range(offset, offset + psize - 1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception:
-        return pd.DataFrame()
+
+    def _fetch_sensor(sensor_name: str) -> list:
+        rows, psize, offset = [], 1000, 0
+        try:
+            while True:
+                res = db.table("sensor_readings") \
+                    .select("created_at,sensor,value") \
+                    .eq("sensor", sensor_name) \
+                    .gte("created_at", since) \
+                    .order("created_at", desc=False) \
+                    .range(offset, offset + psize - 1).execute()
+                batch = res.data
+                if not batch: break
+                rows.extend(batch)
+                if len(batch) < psize: break
+                offset += psize
+        except Exception:
+            pass
+        return rows
+
+    rows = _fetch_sensor("power") + _fetch_sensor("irradiance")
     if not rows:
         return pd.DataFrame()
+
     df = pd.DataFrame(rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
-    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
     out = []
     for date, grp in df.groupby("date"):
         pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
         irr = grp[grp["sensor"] == "irradiance"]
         if len(pwr) >= 2:
-            import numpy as np
             times = pwr["created_at"].astype("int64").values / 1e9 / 3600
             fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
             kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
@@ -1415,8 +1420,8 @@ if is_internal and tab_smhi is not None:
         date_to   = selected_days[-1]
 
         # Convert to UTC — from = start of first day, to = end of last day
-        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
-        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
+        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
         h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
