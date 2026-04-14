@@ -228,6 +228,52 @@ def fetch_history_range(date_from, date_to) -> pd.DataFrame:
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df.sort_values("created_at")
 
+@st.cache_data(ttl=3600)
+def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
+    """
+    Fetch daily aggregates for overview chart — one row per day per sensor.
+    Only pulls power + irradiance. Much lighter than raw data.
+    Cached 1 hour — used only for the coarse date-selection overview.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows, psize, offset = [], 1000, 0
+    try:
+        while True:
+            res = db.table("sensor_readings") \
+                .select("created_at,sensor,value") \
+                .in_("sensor", ["power", "irradiance"]) \
+                .gte("created_at", since) \
+                .order("created_at", desc=False) \
+                .range(offset, offset + psize - 1).execute()
+            batch = res.data
+            if not batch: break
+            rows.extend(batch)
+            if len(batch) < psize: break
+            offset += psize
+    except Exception:
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
+    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
+    out = []
+    for date, grp in df.groupby("date"):
+        pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
+        irr = grp[grp["sensor"] == "irradiance"]
+        if len(pwr) >= 2:
+            import numpy as np
+            times = pwr["created_at"].astype("int64").values / 1e9 / 3600
+            fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+            kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
+        else:
+            kwh = 0.0
+        peak_irr = float(irr["value"].max()) if not irr.empty else 0.0
+        out.append({"date": date, "kwh": round(kwh, 2), "peak_irr": round(peak_irr, 0)})
+    return pd.DataFrame(out).sort_values("date")
+
+
 @st.cache_data(ttl=60)
 def fetch_today_power() -> pd.DataFrame:
     """Fetch all power readings from midnight today — used for energy integration."""
@@ -812,8 +858,47 @@ with tab_live:
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
+    # ── Översikt — välj period ────────────────────────────────
+    today = datetime.now(_swe).date()
+
+    df_daily = fetch_daily_summary(days=90)
+    if not df_daily.empty:
+        st.markdown('<div class="section-title">Översikt — klicka för att välja period</div>',
+                    unsafe_allow_html=True)
+        fig_ov = go.Figure()
+        fig_ov.add_trace(go.Bar(
+            x=df_daily["date"].astype(str), y=df_daily["kwh"],
+            name="Energi (kWh)", marker_color=TEAL,
+            hovertemplate="<b>%{x}</b><br>%{y:.2f} kWh<extra></extra>",
+        ))
+        fig_ov.add_trace(go.Scatter(
+            x=df_daily["date"].astype(str), y=df_daily["peak_irr"] / 150,
+            name="Toppinstrålning", mode="lines",
+            line=dict(color=AMBER, width=1.5),
+            yaxis="y2",
+            hovertemplate="<b>%{x}</b><br>%{customdata:.0f} W/m²<extra></extra>",
+            customdata=df_daily["peak_irr"],
+        ))
+        fig_ov.update_layout(
+            height=160, margin=dict(l=0, r=0, t=6, b=0),
+            hovermode="x unified", barmode="overlay",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=9, color=MUTED, family="Inter")),
+            yaxis=dict(title="kWh", gridcolor=BORDER, color=MUTED,
+                       tickfont=dict(size=9), titlefont=dict(size=9)),
+            yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                        showticklabels=False),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"),
+        )
+        fig_ov.update_xaxes(showgrid=False, color=MUTED, tickfont=dict(size=9),
+                             tickangle=-45)
+        st.plotly_chart(fig_ov, use_container_width=True,
+                        config={"displayModeBar": False, "scrollZoom": False})
+        st.caption("Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). "
+                   "Välj period med datumväljarna nedan.")
+
     # ── Datumintervall ────────────────────────────────────────
-    today     = datetime.now(SWE).date()
     col_from, col_to = st.columns(2)
     with col_from:
         date_from = st.date_input("Från", value=today - timedelta(days=7),
@@ -823,8 +908,8 @@ with tab_hist:
                                 min_value=date_from, max_value=today, key="hist_to")
 
     # Convert to UTC datetimes covering full days in Swedish time
-    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
     hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
     with st.spinner(T["loading_hist"]):
