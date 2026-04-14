@@ -812,15 +812,24 @@ with tab_live:
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
-    # ── Tidsintervall ─────────────────────────────────────────
-    hours = st.selectbox("Tidsintervall",
-        [1, 6, 12, 24, 48, 168], index=3,
-        format_func=lambda h: f"{h}h" if h < 24 else
-            (f"{h//24} dag" if h//24 == 1 else f"{h//24} dagar"))
+    # ── Datumintervall ────────────────────────────────────────
+    today     = datetime.now(SWE).date()
+    col_from, col_to = st.columns(2)
+    with col_from:
+        date_from = st.date_input("Från", value=today - timedelta(days=7),
+                                  max_value=today, key="hist_from")
+    with col_to:
+        date_to = st.date_input("Till", value=today,
+                                min_value=date_from, max_value=today, key="hist_to")
+
+    # Convert to UTC datetimes covering full days in Swedish time
+    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+    hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
     with st.spinner(T["loading_hist"]):
-        df_hist = fetch_history(hours)
-        df_smhi_h = fetch_smhi_history(hours)   # SMHI station data for same period
+        df_hist   = fetch_history_range(dt_from, dt_to)
+        df_smhi_h = fetch_smhi_history(hours_back)
 
     if df_hist.empty:
         st.warning(T["no_data_interval"])
@@ -1321,8 +1330,8 @@ if is_internal and tab_smhi is not None:
         date_to   = selected_days[-1]
 
         # Convert to UTC — from = start of first day, to = end of last day
-        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
         h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
