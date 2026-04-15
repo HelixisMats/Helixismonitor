@@ -858,21 +858,24 @@ with tab_live:
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
-    # ── Översikt — välj period ────────────────────────────────
     today = datetime.now(SWE).date()
 
+    # ── Översikt (visuell referens — 90 dagar) ────────────────
     df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
-        st.markdown('<div class="section-title">Översikt — klicka för att välja period</div>',
+        st.markdown('<div class="section-title">Översikt — senaste 90 dagarna</div>',
                     unsafe_allow_html=True)
+        # Ensure date column is proper date strings (YYYY-MM-DD), not datetimes
+        df_daily = df_daily.copy()
+        df_daily["date_str"] = df_daily["date"].apply(lambda d: str(d)[:10])
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Bar(
-            x=df_daily["date"].astype(str), y=df_daily["kwh"],
+            x=df_daily["date_str"], y=df_daily["kwh"],
             name="Energi (kWh)", marker_color=TEAL,
             hovertemplate="<b>%{x}</b><br>%{y:.2f} kWh<extra></extra>",
         ))
         fig_ov.add_trace(go.Scatter(
-            x=df_daily["date"].astype(str), y=df_daily["peak_irr"] / 150,
+            x=df_daily["date_str"], y=df_daily["peak_irr"] / 150,
             name="Toppinstrålning", mode="lines",
             line=dict(color=AMBER, width=1.5),
             yaxis="y2",
@@ -882,6 +885,8 @@ with tab_hist:
         fig_ov.update_layout(
             height=160, margin=dict(l=0, r=0, t=6, b=0),
             hovermode="x unified",
+            xaxis=dict(type="category", showgrid=False, color=MUTED,
+                       tickfont=dict(size=9), tickangle=-45),
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=9, color=MUTED, family="Inter")),
             yaxis=dict(title=dict(text="kWh", font=dict(size=9)),
@@ -891,379 +896,390 @@ with tab_hist:
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
         )
-        fig_ov.update_xaxes(showgrid=False, color=MUTED, tickfont=dict(size=9),
-                             tickangle=-45)
         st.plotly_chart(fig_ov, use_container_width=True,
                         config={"displayModeBar": False, "scrollZoom": False})
-        st.caption("Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). "
-                   "Välj period med datumväljarna nedan.")
+        st.caption("Använd grafen som referens — välj sedan period nedan och klicka Ladda data.")
 
-    # ── Datumintervall ────────────────────────────────────────
-    col_from, col_to = st.columns(2)
+    # ── Datumintervall + ladda-knapp ──────────────────────────
+    col_from, col_to, col_btn = st.columns([2, 2, 1])
     with col_from:
         date_from = st.date_input("Från", value=today - timedelta(days=7),
                                   max_value=today, key="hist_from")
     with col_to:
         date_to = st.date_input("Till", value=today,
                                 min_value=date_from, max_value=today, key="hist_to")
+    with col_btn:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        load_clicked = st.button("⬇ Ladda data", use_container_width=True, type="primary")
 
-    # Convert to UTC datetimes covering full days in Swedish time
-    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-    hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
+    if load_clicked:
+        dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
+        with st.spinner(T["loading_hist"]):
+            st.session_state["hist_df"]      = fetch_history_range(dt_from, dt_to)
+            st.session_state["hist_smhi_df"] = fetch_smhi_history(hours_back)
 
-    with st.spinner(T["loading_hist"]):
-        df_hist   = fetch_history_range(dt_from, dt_to)
-        df_smhi_h = fetch_smhi_history(hours_back)
-
-    if df_hist.empty:
-        st.warning(T["no_data_interval"])
+    # Show prompt until data has been loaded at least once
+    if "hist_df" not in st.session_state:
+        st.info("Välj period ovan och klicka **Ladda data**.")
     else:
-        cmap = {
-            "temp_right_coll": RUST,  "temp_left_coll": AMBER,
-            "temp_forward":    RUST,  "temp_return":    SLATE,
-            "temp_tank":       TEAL,  "power":          RUST,
-            "flow":            SLATE, "irradiance":     AMBER,
-            "wind":            SLATE, "temp_difference": TEXT,
-        }
+        df_hist   = st.session_state["hist_df"]
+        df_smhi_h = st.session_state["hist_smhi_df"]
 
-        # ── 1. Sol, Effekt & Väder (kombinerad graf med dubbel y-axel) ──
-        st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
-                    unsafe_allow_html=True)
-        fig_solar = go.Figure()
-        # Vänster axel: instrålning W/m²
-        # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
-        for sensor, color, name, yaxis, dash in [
-            ("irradiance", AMBER, T["irr_lbl"],  "y",  "solid"),
-            ("power",      RUST,  T["power_lbl"], "y2", "solid"),
-            ("wind",       SLATE, T["wind_lbl"],         "y2", "dot"),
-        ]:
-            sub = df_hist[df_hist["sensor"] == sensor]
-            if not sub.empty:
-                fig_solar.add_trace(go.Scatter(
-                    x=sub["created_at"], y=sub["value"],
-                    name=name, mode="lines",
-                    line=dict(width=1.8, color=color, dash=dash),
-                    yaxis=yaxis,
-                ))
-        # Overlay outside temp (SMHI) on solar chart — shows temp effect on performance
-        if not df_smhi_h.empty:
-            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
-            if not sub_ot.empty:
-                fig_solar.add_trace(go.Scatter(
-                    x=sub_ot["created_at"], y=sub_ot["value"],
-                    name="Outside temp °C (SMHI)", mode="lines",
-                    line=dict(width=1.5, color="#7B5EA7", dash="dot"),
-                    yaxis="y3"))
-        fig_solar.update_layout(
-            height=340, margin=dict(l=0, r=90, t=10, b=0),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
-                       tickfont=dict(color=AMBER), gridcolor=BORDER),
-            yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
-                        tickfont=dict(color=RUST), overlaying="y", side="right",
-                        showgrid=False),
-            yaxis3=dict(title=dict(text="°C", font=dict(color="#7B5EA7")),
-                        tickfont=dict(color="#7B5EA7"), overlaying="y",
-                        side="right", anchor="free", position=1.0,
-                        showgrid=False),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=MUTED, family="Inter"),
-        )
-        fig_solar.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        # dt_from/dt_to still needed downstream for some charts
+        dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
-        # ── 2. Temperaturer & Tryck ──────────────────────────
-        st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
-                    unsafe_allow_html=True)
-        temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
-        fig_temp = go.Figure()
-        for s in temp_sensors:
-            sub = df_hist[df_hist["sensor"] == s]
-            if not sub.empty:
-                names_map = {"temp_right_coll":"Collector R","temp_left_coll":"Collector L",
-                             "temp_forward":"Forward","temp_return":"Return","temp_tank":"Tank"}
-                fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
-                    name=names_map[s], mode="lines",
-                    line=dict(width=1.8, color=cmap[s]), yaxis="y"))
-        # Outside temperature from SMHI (Helsingborg station)
-        if not df_smhi_h.empty:
-            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
-            if not sub_ot.empty:
-                fig_temp.add_trace(go.Scatter(
-                    x=sub_ot["created_at"], y=sub_ot["value"],
-                    name="Outside temp (SMHI)", mode="lines",
-                    line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
-        fig_temp.update_layout(
-            height=320, margin=dict(l=0, r=10, t=10, b=0),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
-                       tickfont=dict(color=TEXT), gridcolor=BORDER),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=MUTED, family="Inter"),
-        )
-        fig_temp.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        if df_hist.empty:
+            st.warning(T["no_data_interval"])
+        else:
+            cmap = {
+                "temp_right_coll": RUST,  "temp_left_coll": AMBER,
+                "temp_forward":    RUST,  "temp_return":    SLATE,
+                "temp_tank":       TEAL,  "power":          RUST,
+                "flow":            SLATE, "irradiance":     AMBER,
+                "wind":            SLATE, "temp_difference": TEXT,
+            }
 
-        # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
-        st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
-                    unsafe_allow_html=True)
-        fig_dt = go.Figure()
-        # Left axis: ΔT
-        sub_dt = df_hist[df_hist["sensor"] == "temp_difference"]
-        if not sub_dt.empty:
-            fig_dt.add_trace(go.Scatter(
-                x=sub_dt["created_at"], y=sub_dt["value"],
-                name="ΔT (°C)", mode="lines",
-                line=dict(width=1.8, color=TEXT), yaxis="y"))
-        # Right axis (inner): Flow m³/h
-        sub_fl = df_hist[df_hist["sensor"] == "flow"]
-        if not sub_fl.empty:
-            fig_dt.add_trace(go.Scatter(
-                x=sub_fl["created_at"], y=sub_fl["value"],
-                name=T["flow_lbl"], mode="lines",
-                line=dict(width=1.8, color=SLATE), yaxis="y2"))
-        # Right axis (outer): Pressure bar
-        sub_pr = df_hist[df_hist["sensor"] == "pressure"]
-        if not sub_pr.empty:
-            fig_dt.add_trace(go.Scatter(
-                x=sub_pr["created_at"], y=sub_pr["value"],
-                name=T["pressure_lbl"], mode="lines",
-                line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
-        fig_dt.update_layout(
-            height=280, margin=dict(l=0, r=90, t=10, b=0),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        font=dict(size=10, color=MUTED, family="Inter")),
-            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
-                       tickfont=dict(color=TEXT), gridcolor=BORDER),
-            yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
-                        tickfont=dict(color=SLATE), overlaying="y", side="right",
-                        showgrid=False, anchor="x"),
-            yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
-                        tickfont=dict(color=TEAL), overlaying="y", side="right",
-                        showgrid=False, anchor="free", position=1.0,
-                        range=[0, 8]),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=MUTED, family="Inter"),
-        )
-        fig_dt.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+            # ── 1. Sol, Effekt & Väder (kombinerad graf med dubbel y-axel) ──
+            st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
+                        unsafe_allow_html=True)
+            fig_solar = go.Figure()
+            # Vänster axel: instrålning W/m²
+            # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
+            for sensor, color, name, yaxis, dash in [
+                ("irradiance", AMBER, T["irr_lbl"],  "y",  "solid"),
+                ("power",      RUST,  T["power_lbl"], "y2", "solid"),
+                ("wind",       SLATE, T["wind_lbl"],         "y2", "dot"),
+            ]:
+                sub = df_hist[df_hist["sensor"] == sensor]
+                if not sub.empty:
+                    fig_solar.add_trace(go.Scatter(
+                        x=sub["created_at"], y=sub["value"],
+                        name=name, mode="lines",
+                        line=dict(width=1.8, color=color, dash=dash),
+                        yaxis=yaxis,
+                    ))
+            # Overlay outside temp (SMHI) on solar chart — shows temp effect on performance
+            if not df_smhi_h.empty:
+                sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+                if not sub_ot.empty:
+                    fig_solar.add_trace(go.Scatter(
+                        x=sub_ot["created_at"], y=sub_ot["value"],
+                        name="Outside temp °C (SMHI)", mode="lines",
+                        line=dict(width=1.5, color="#7B5EA7", dash="dot"),
+                        yaxis="y3"))
+            fig_solar.update_layout(
+                height=340, margin=dict(l=0, r=90, t=10, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            font=dict(size=10, color=MUTED, family="Inter")),
+                yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                           tickfont=dict(color=AMBER), gridcolor=BORDER),
+                yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
+                            tickfont=dict(color=RUST), overlaying="y", side="right",
+                            showgrid=False),
+                yaxis3=dict(title=dict(text="°C", font=dict(color="#7B5EA7")),
+                            tickfont=dict(color="#7B5EA7"), overlaying="y",
+                            side="right", anchor="free", position=1.0,
+                            showgrid=False),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=MUTED, family="Inter"),
+            )
+            fig_solar.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-        # ── 4. Sammanfattning & Energi ────────────────────────
-        st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
-                    unsafe_allow_html=True)
-        all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
-        piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
-            .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
-        piv.columns = ["Sensor","Min","Max","Medel"]
-        sensor_order = all_sensors
-        piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
-                                           if s in sensor_order else 99)
-        st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
-                     use_container_width=True, hide_index=True)
+            # ── 2. Temperaturer & Tryck ──────────────────────────
+            st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
+                        unsafe_allow_html=True)
+            temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
+            fig_temp = go.Figure()
+            for s in temp_sensors:
+                sub = df_hist[df_hist["sensor"] == s]
+                if not sub.empty:
+                    names_map = {"temp_right_coll":"Collector R","temp_left_coll":"Collector L",
+                                 "temp_forward":"Forward","temp_return":"Return","temp_tank":"Tank"}
+                    fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
+                        name=names_map[s], mode="lines",
+                        line=dict(width=1.8, color=cmap[s]), yaxis="y"))
+            # Outside temperature from SMHI (Helsingborg station)
+            if not df_smhi_h.empty:
+                sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+                if not sub_ot.empty:
+                    fig_temp.add_trace(go.Scatter(
+                        x=sub_ot["created_at"], y=sub_ot["value"],
+                        name="Outside temp (SMHI)", mode="lines",
+                        line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
+            fig_temp.update_layout(
+                height=320, margin=dict(l=0, r=10, t=10, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            font=dict(size=10, color=MUTED, family="Inter")),
+                yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                           tickfont=dict(color=TEXT), gridcolor=BORDER),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=MUTED, family="Inter"),
+            )
+            fig_temp.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-        # Energy today always uses full-day data — same source as Live tab
-        ep_today = integrate_power(fetch_today_power())
-        ep_window = integrate_power(df_hist)   # energy in selected window only
+            # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
+            st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
+                        unsafe_allow_html=True)
+            fig_dt = go.Figure()
+            # Left axis: ΔT
+            sub_dt = df_hist[df_hist["sensor"] == "temp_difference"]
+            if not sub_dt.empty:
+                fig_dt.add_trace(go.Scatter(
+                    x=sub_dt["created_at"], y=sub_dt["value"],
+                    name="ΔT (°C)", mode="lines",
+                    line=dict(width=1.8, color=TEXT), yaxis="y"))
+            # Right axis (inner): Flow m³/h
+            sub_fl = df_hist[df_hist["sensor"] == "flow"]
+            if not sub_fl.empty:
+                fig_dt.add_trace(go.Scatter(
+                    x=sub_fl["created_at"], y=sub_fl["value"],
+                    name=T["flow_lbl"], mode="lines",
+                    line=dict(width=1.8, color=SLATE), yaxis="y2"))
+            # Right axis (outer): Pressure bar
+            sub_pr = df_hist[df_hist["sensor"] == "pressure"]
+            if not sub_pr.empty:
+                fig_dt.add_trace(go.Scatter(
+                    x=sub_pr["created_at"], y=sub_pr["value"],
+                    name=T["pressure_lbl"], mode="lines",
+                    line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
+            fig_dt.update_layout(
+                height=280, margin=dict(l=0, r=90, t=10, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            font=dict(size=10, color=MUTED, family="Inter")),
+                yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                           tickfont=dict(color=TEXT), gridcolor=BORDER),
+                yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                            tickfont=dict(color=SLATE), overlaying="y", side="right",
+                            showgrid=False, anchor="x"),
+                yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
+                            tickfont=dict(color=TEAL), overlaying="y", side="right",
+                            showgrid=False, anchor="free", position=1.0,
+                            range=[0, 8]),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=MUTED, family="Inter"),
+            )
+            fig_dt.update_xaxes(showgrid=False, color=MUTED)
+            st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-        st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
-        ec1, ec2, ec3 = st.columns(3)
-        ec1.metric(T["energy_today_trap"], fmt(ep_today, 3, "kWh"),
-            help=T["trap_help"])
-        ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
-            fmt(ep_window, 3, "kWh"),
-            help="Energy in the selected history window only (not necessarily from midnight).")
-        ec2.metric(T["heat_sensor_total"],
-                   fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
-                   help=T["heat_help"])
+            # ── 4. Sammanfattning & Energi ────────────────────────
+            st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
+                        unsafe_allow_html=True)
+            all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
+            piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
+                .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
+            piv.columns = ["Sensor","Min","Max","Medel"]
+            sensor_order = all_sensors
+            piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
+                                               if s in sensor_order else 99)
+            st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
+                         use_container_width=True, hide_index=True)
 
-        # ── Temporary: Three-method power correlation ────────────
-        with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
-            st.markdown(f"""
-**M1 — Power sensor:** Direct `power` reading, kW.
-**M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
-**M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
+            # Energy today always uses full-day data — same source as Live tab
+            ep_today = integrate_power(fetch_today_power())
+            ep_window = integrate_power(df_hist)   # energy in selected window only
 
-**Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
-If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
-Ratio M1/M2 reveals the actual cp of the fluid.
-""")
-            RHO = 1000
-            CP_DEFAULT = 3800
+            st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
+            ec1, ec2, ec3 = st.columns(3)
+            ec1.metric(T["energy_today_trap"], fmt(ep_today, 3, "kWh"),
+                help=T["trap_help"])
+            ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
+                fmt(ep_window, 3, "kWh"),
+                help="Energy in the selected history window only (not necessarily from midnight).")
+            ec2.metric(T["heat_sensor_total"],
+                       fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
+                       help=T["heat_help"])
 
-            # cp slider — always visible so it drives both charts
-            cp_val = st.slider("cp (J/kg·K) — adjust to match M1 vs M2",
-                               min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
-                               help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
+            # ── Temporary: Three-method power correlation ────────────
+            with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
+                st.markdown(f"""
+    **M1 — Power sensor:** Direct `power` reading, kW.
+    **M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
+    **M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
 
-            sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
-            dfs = {}
-            for s in sensors_needed:
-                sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
-                sub = sub.rename(columns={"value": s}).set_index("created_at")
-                dfs[s] = sub
+    **Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
+    If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
+    Ratio M1/M2 reveals the actual cp of the fluid.
+    """)
+                RHO = 1000
+                CP_DEFAULT = 3800
 
-            if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
-                base = dfs["flow"]
-                for s in ["temp_forward","temp_return","power","heat_energy"]:
-                    if s in dfs and not dfs[s].empty:
-                        base = pd.merge_asof(
-                            base.sort_index().reset_index(),
-                            dfs[s].sort_index().reset_index(),
-                            on="created_at", tolerance=pd.Timedelta("2min")
-                        ).set_index("created_at")
-                base = base.dropna(subset=["flow","temp_forward","temp_return"])
+                # cp slider — always visible so it drives both charts
+                cp_val = st.slider("cp (J/kg·K) — adjust to match M1 vs M2",
+                                   min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
+                                   help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
 
-                # M2 with selected cp
-                base["p_physics"] = (
-                    base["flow"] / 3600 * RHO * cp_val *
-                    (base["temp_forward"] - base["temp_return"])
-                ) / 1000
+                sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
+                dfs = {}
+                for s in sensors_needed:
+                    sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
+                    sub = sub.rename(columns={"value": s}).set_index("created_at")
+                    dfs[s] = sub
 
-                # M3: cumulative delta from t₀ in kWh
-                if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
-                    e0 = float(base["heat_energy"].dropna().iloc[0])
-                    base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
+                if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
+                    base = dfs["flow"]
+                    for s in ["temp_forward","temp_return","power","heat_energy"]:
+                        if s in dfs and not dfs[s].empty:
+                            base = pd.merge_asof(
+                                base.sort_index().reset_index(),
+                                dfs[s].sort_index().reset_index(),
+                                on="created_at", tolerance=pd.Timedelta("2min")
+                            ).set_index("created_at")
+                    base = base.dropna(subset=["flow","temp_forward","temp_return"])
 
-                # ── Instantaneous power chart (M1 vs M2) ──────────
-                st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
-                            unsafe_allow_html=True)
-                fig_pwr = go.Figure()
-                if "power" in base.columns:
+                    # M2 with selected cp
+                    base["p_physics"] = (
+                        base["flow"] / 3600 * RHO * cp_val *
+                        (base["temp_forward"] - base["temp_return"])
+                    ) / 1000
+
+                    # M3: cumulative delta from t₀ in kWh
+                    if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
+                        e0 = float(base["heat_energy"].dropna().iloc[0])
+                        base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
+
+                    # ── Instantaneous power chart (M1 vs M2) ──────────
+                    st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
+                                unsafe_allow_html=True)
+                    fig_pwr = go.Figure()
+                    if "power" in base.columns:
+                        fig_pwr.add_trace(go.Scatter(
+                            x=base.index, y=base["power"],
+                            name="M1: power sensor (kW)",
+                            mode="lines", line=dict(color=RUST, width=2)))
                     fig_pwr.add_trace(go.Scatter(
-                        x=base.index, y=base["power"],
-                        name="M1: power sensor (kW)",
+                        x=base.index, y=base["p_physics"],
+                        name=f"M2: flow×ΔT (kW, cp={cp_val})",
+                        mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+                    fig_pwr.update_layout(
+                        height=260, margin=dict(l=0,r=0,t=10,b=0),
+                        yaxis_title="kW", hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    font=dict(size=10, color=MUTED, family="Inter")),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"))
+                    fig_pwr.update_xaxes(showgrid=False, color=MUTED)
+                    fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
+                    st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+
+                    # ── Correlation metrics ────────────────────────────
+                    if "power" in base.columns:
+                        both = base[["power","p_physics"]].dropna()
+                        if len(both) > 10:
+                            corr  = both["power"].corr(both["p_physics"])
+                            ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
+                            implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
+                                help=">0.99 = power is calculated from flow×ΔT in controller")
+                            c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
+                                help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
+                            c3.metric("cp used", f"{cp_val} J/kg·K")
+                            c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
+                                help="The cp value that would make M2 exactly match M1")
+                            if corr > 0.99:
+                                st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
+                                        "internally. M1 and M2 are **not independent**.")
+                            elif corr > 0.95:
+                                st.warning("⚠️ 0.95–0.99 — likely same source, small calibration difference.")
+                            else:
+                                st.success("✅ <0.95 — power sensor appears to be an independent measurement.")
+
+                    # ── Cumulative energy chart (M1 + M2 + M3) ────────
+                    st.markdown(f'<div class="section-title">Cumulative energy from t₀ — all 3 methods (kWh)</div>',
+                                unsafe_allow_html=True)
+
+                    # M1 cumulative: trapezoid of power sensor
+                    pwr_sub = base["power"].dropna()
+                    times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
+                    try:
+                        import numpy as np
+                        fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+                        cum_m1 = []
+                        t_arr = times_h.values
+                        p_arr = pwr_sub.values
+                        t0_h  = t_arr[0]
+                        for i in range(len(t_arr)):
+                            cum_m1.append(float(max(0, fn(p_arr[:i+1], t_arr[:i+1]) - t0_h * 0)))
+                        # simpler: running integral
+                        cum_m1 = [0.0]
+                        for i in range(1, len(t_arr)):
+                            cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+                    except Exception:
+                        cum_m1 = [0.0]
+                        for i in range(1, len(t_arr)):
+                            cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+
+                    # M2 cumulative: trapezoid of p_physics aligned to same index
+                    phy_sub = base["p_physics"].reindex(pwr_sub.index, method="nearest")
+                    ph_arr  = phy_sub.values
+                    cum_m2  = [0.0]
+                    for i in range(1, len(t_arr)):
+                        cum_m2.append(cum_m2[-1] + (ph_arr[i]+ph_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+
+                    fig_cum = go.Figure()
+                    fig_cum.add_trace(go.Scatter(
+                        x=pwr_sub.index, y=cum_m1,
+                        name="M1 cumulative (power sensor, kWh)",
                         mode="lines", line=dict(color=RUST, width=2)))
-                fig_pwr.add_trace(go.Scatter(
-                    x=base.index, y=base["p_physics"],
-                    name=f"M2: flow×ΔT (kW, cp={cp_val})",
-                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
-                fig_pwr.update_layout(
-                    height=260, margin=dict(l=0,r=0,t=10,b=0),
-                    yaxis_title="kW", hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                font=dict(size=10, color=MUTED, family="Inter")),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=MUTED, family="Inter"))
-                fig_pwr.update_xaxes(showgrid=False, color=MUTED)
-                fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                    fig_cum.add_trace(go.Scatter(
+                        x=pwr_sub.index, y=cum_m2,
+                        name=f"M2 cumulative (flow×ΔT cp={cp_val}, kWh)",
+                        mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
 
-                # ── Correlation metrics ────────────────────────────
-                if "power" in base.columns:
-                    both = base[["power","p_physics"]].dropna()
-                    if len(both) > 10:
-                        corr  = both["power"].corr(both["p_physics"])
-                        ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
-                        implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
-                            help=">0.99 = power is calculated from flow×ΔT in controller")
-                        c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
-                            help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
-                        c3.metric("cp used", f"{cp_val} J/kg·K")
-                        c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
-                            help="The cp value that would make M2 exactly match M1")
-                        if corr > 0.99:
-                            st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
-                                    "internally. M1 and M2 are **not independent**.")
-                        elif corr > 0.95:
-                            st.warning("⚠️ 0.95–0.99 — likely same source, small calibration difference.")
-                        else:
-                            st.success("✅ <0.95 — power sensor appears to be an independent measurement.")
+                    # M3: heat_energy counter delta
+                    if "heat_kwh_delta" in base.columns:
+                        m3_sub = base["heat_kwh_delta"].dropna()
+                        if not m3_sub.empty:
+                            fig_cum.add_trace(go.Scatter(
+                                x=m3_sub.index, y=m3_sub.values,
+                                name="M3 cumulative (heat energy counter ÷1000→kWh)",
+                                mode="lines", line=dict(color=BLUE, width=2, dash="dash")))
 
-                # ── Cumulative energy chart (M1 + M2 + M3) ────────
-                st.markdown(f'<div class="section-title">Cumulative energy from t₀ — all 3 methods (kWh)</div>',
-                            unsafe_allow_html=True)
+                    fig_cum.update_layout(
+                        height=280, margin=dict(l=0,r=0,t=10,b=0),
+                        yaxis_title="kWh", hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    font=dict(size=10, color=MUTED, family="Inter")),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"))
+                    fig_cum.update_xaxes(showgrid=False, color=MUTED)
+                    fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
+                    st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-                # M1 cumulative: trapezoid of power sensor
-                pwr_sub = base["power"].dropna()
-                times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
-                try:
-                    import numpy as np
-                    fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
-                    cum_m1 = []
-                    t_arr = times_h.values
-                    p_arr = pwr_sub.values
-                    t0_h  = t_arr[0]
-                    for i in range(len(t_arr)):
-                        cum_m1.append(float(max(0, fn(p_arr[:i+1], t_arr[:i+1]) - t0_h * 0)))
-                    # simpler: running integral
-                    cum_m1 = [0.0]
-                    for i in range(1, len(t_arr)):
-                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
-                except Exception:
-                    cum_m1 = [0.0]
-                    for i in range(1, len(t_arr)):
-                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+                    # Three-way end-of-window summary
+                    m1_end = cum_m1[-1] if cum_m1 else None
+                    m2_end = cum_m2[-1] if cum_m2 else None
+                    m3_end = float(base["heat_kwh_delta"].dropna().iloc[-1])                          if "heat_kwh_delta" in base.columns and not base["heat_kwh_delta"].dropna().empty else None
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("M1 total (window)", fmt(m1_end, 3, "kWh"))
+                    s2.metric("M2 total (window)", fmt(m2_end, 3, "kWh"))
+                    s3.metric("M3 delta (window)", fmt(m3_end, 3, "kWh"),
+                              help="Change in heat energy counter over this window. "
+                                   "Already ×1000 (MWh→kWh). Should match M1 if calibrated.")
+                    if m1_end and m3_end and m1_end > 0.1:
+                        m3_ratio = m3_end / m1_end
+                        st.caption(f"M3/M1 ratio: {m3_ratio:.3f} — "
+                                   f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
+                else:
+                    st.info("Need flow, temp_forward and temp_return data in selected window.")
 
-                # M2 cumulative: trapezoid of p_physics aligned to same index
-                phy_sub = base["p_physics"].reindex(pwr_sub.index, method="nearest")
-                ph_arr  = phy_sub.values
-                cum_m2  = [0.0]
-                for i in range(1, len(t_arr)):
-                    cum_m2.append(cum_m2[-1] + (ph_arr[i]+ph_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
-
-                fig_cum = go.Figure()
-                fig_cum.add_trace(go.Scatter(
-                    x=pwr_sub.index, y=cum_m1,
-                    name="M1 cumulative (power sensor, kWh)",
-                    mode="lines", line=dict(color=RUST, width=2)))
-                fig_cum.add_trace(go.Scatter(
-                    x=pwr_sub.index, y=cum_m2,
-                    name=f"M2 cumulative (flow×ΔT cp={cp_val}, kWh)",
-                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
-
-                # M3: heat_energy counter delta
-                if "heat_kwh_delta" in base.columns:
-                    m3_sub = base["heat_kwh_delta"].dropna()
-                    if not m3_sub.empty:
-                        fig_cum.add_trace(go.Scatter(
-                            x=m3_sub.index, y=m3_sub.values,
-                            name="M3 cumulative (heat energy counter ÷1000→kWh)",
-                            mode="lines", line=dict(color=BLUE, width=2, dash="dash")))
-
-                fig_cum.update_layout(
-                    height=280, margin=dict(l=0,r=0,t=10,b=0),
-                    yaxis_title="kWh", hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                font=dict(size=10, color=MUTED, family="Inter")),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=MUTED, family="Inter"))
-                fig_cum.update_xaxes(showgrid=False, color=MUTED)
-                fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
-
-                # Three-way end-of-window summary
-                m1_end = cum_m1[-1] if cum_m1 else None
-                m2_end = cum_m2[-1] if cum_m2 else None
-                m3_end = float(base["heat_kwh_delta"].dropna().iloc[-1])                          if "heat_kwh_delta" in base.columns and not base["heat_kwh_delta"].dropna().empty else None
-                s1, s2, s3 = st.columns(3)
-                s1.metric("M1 total (window)", fmt(m1_end, 3, "kWh"))
-                s2.metric("M2 total (window)", fmt(m2_end, 3, "kWh"))
-                s3.metric("M3 delta (window)", fmt(m3_end, 3, "kWh"),
-                          help="Change in heat energy counter over this window. "
-                               "Already ×1000 (MWh→kWh). Should match M1 if calibrated.")
-                if m1_end and m3_end and m1_end > 0.1:
-                    m3_ratio = m3_end / m1_end
-                    st.caption(f"M3/M1 ratio: {m3_ratio:.3f} — "
-                               f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
-            else:
-                st.info("Need flow, temp_forward and temp_return data in selected window.")
-
-        with st.expander(f"📥 {T['raw_export']}"):
-            piv2 = df_hist.pivot_table(
-                index="created_at", columns="sensor",
-                values="value", aggfunc="last"
-            ).reset_index().sort_values("created_at", ascending=False)
-            st.dataframe(piv2.head(500), use_container_width=True)
-            st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
-                f"helixis_{date_from}_{date_to}.csv", "text/csv")
+            with st.expander(f"📥 {T['raw_export']}"):
+                piv2 = df_hist.pivot_table(
+                    index="created_at", columns="sensor",
+                    values="value", aggfunc="last"
+                ).reset_index().sort_values("created_at", ascending=False)
+                st.dataframe(piv2.head(500), use_container_width=True)
+                st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
+                    f"helixis_{date_from}_{date_to}.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
