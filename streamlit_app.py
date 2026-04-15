@@ -231,44 +231,39 @@ def fetch_history_range(date_from, date_to) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
     """
-    Fetch daily aggregates for overview chart.
-    Two separate small queries (power, irradiance) — avoids large payloads.
-    Cached 1 hour.
+    Fetch daily aggregates for overview chart — one row per day per sensor.
+    Only pulls power + irradiance. Much lighter than raw data.
+    Cached 1 hour — used only for the coarse date-selection overview.
     """
-    import numpy as np
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    def _fetch_sensor(sensor_name: str) -> list:
-        rows, psize, offset = [], 1000, 0
-        try:
-            while True:
-                res = db.table("sensor_readings") \
-                    .select("created_at,sensor,value") \
-                    .eq("sensor", sensor_name) \
-                    .gte("created_at", since) \
-                    .order("created_at", desc=False) \
-                    .range(offset, offset + psize - 1).execute()
-                batch = res.data
-                if not batch: break
-                rows.extend(batch)
-                if len(batch) < psize: break
-                offset += psize
-        except Exception:
-            pass
-        return rows
-
-    rows = _fetch_sensor("power") + _fetch_sensor("irradiance")
+    rows, psize, offset = [], 1000, 0
+    try:
+        while True:
+            res = db.table("sensor_readings") \
+                .select("created_at,sensor,value") \
+                .in_("sensor", ["power", "irradiance"]) \
+                .gte("created_at", since) \
+                .order("created_at", desc=False) \
+                .range(offset, offset + psize - 1).execute()
+            batch = res.data
+            if not batch: break
+            rows.extend(batch)
+            if len(batch) < psize: break
+            offset += psize
+    except Exception:
+        return pd.DataFrame()
     if not rows:
         return pd.DataFrame()
-
     df = pd.DataFrame(rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
+    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
     out = []
     for date, grp in df.groupby("date"):
         pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
         irr = grp[grp["sensor"] == "irradiance"]
         if len(pwr) >= 2:
+            import numpy as np
             times = pwr["created_at"].astype("int64").values / 1e9 / 3600
             fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
             kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
@@ -864,7 +859,7 @@ with tab_live:
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
     # ── Översikt — välj period ────────────────────────────────
-    today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
+    today = datetime.now(_swe).date()
 
     df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
@@ -886,11 +881,11 @@ with tab_hist:
         ))
         fig_ov.update_layout(
             height=160, margin=dict(l=0, r=0, t=6, b=0),
-            hovermode="x unified",
+            hovermode="x unified", barmode="overlay",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=9, color=MUTED, family="Inter")),
-            yaxis=dict(title=dict(text="kWh", font=dict(size=9)),
-                       gridcolor=BORDER, color=MUTED, tickfont=dict(size=9)),
+            yaxis=dict(title="kWh", gridcolor=BORDER, color=MUTED,
+                       tickfont=dict(size=9), titlefont=dict(size=9)),
             yaxis2=dict(overlaying="y", side="right", showgrid=False,
                         showticklabels=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -913,8 +908,8 @@ with tab_hist:
                                 min_value=date_from, max_value=today, key="hist_to")
 
     # Convert to UTC datetimes covering full days in Swedish time
-    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
-    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
+    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
     hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
     with st.spinner(T["loading_hist"]):
@@ -1268,7 +1263,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
             ).reset_index().sort_values("created_at", ascending=False)
             st.dataframe(piv2.head(500), use_container_width=True)
             st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
-                f"helixis_{hours}h.csv", "text/csv")
+                f"helixis_{date_from}_{date_to}.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
@@ -1420,8 +1415,8 @@ if is_internal and tab_smhi is not None:
         date_to   = selected_days[-1]
 
         # Convert to UTC — from = start of first day, to = end of last day
-        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
-        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=ZoneInfo("Europe/Stockholm")).astimezone(timezone.utc)
+        dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
+        dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=_swe).astimezone(timezone.utc)
         h_cmp   = max(24, int((dt_to - dt_from).total_seconds() / 3600) + 24)
 
         col_l, col_r = st.columns(2)
