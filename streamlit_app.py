@@ -881,11 +881,11 @@ with tab_hist:
         ))
         fig_ov.update_layout(
             height=160, margin=dict(l=0, r=0, t=6, b=0),
-            hovermode="x unified", barmode="overlay",
+            hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=9, color=MUTED, family="Inter")),
-            yaxis=dict(title="kWh", gridcolor=BORDER, color=MUTED,
-                       tickfont=dict(size=9), titlefont=dict(size=9)),
+            yaxis=dict(title=dict(text="kWh", font=dict(size=9)),
+                       gridcolor=BORDER, color=MUTED, tickfont=dict(size=9)),
             yaxis2=dict(overlaying="y", side="right", showgrid=False,
                         showticklabels=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
