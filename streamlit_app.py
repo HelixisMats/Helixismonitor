@@ -229,44 +229,49 @@ def fetch_history_range(date_from, date_to) -> pd.DataFrame:
     return df.sort_values("created_at")
 
 @st.cache_data(ttl=3600)
-def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
+def fetch_daily_summary(days: int = 30) -> pd.DataFrame:
     """
-    Fetch daily aggregates for overview chart — one row per day per sensor.
-    Only pulls power + irradiance. Much lighter than raw data.
-    Cached 1 hour — used only for the coarse date-selection overview.
+    Fetch daily aggregates for the overview chart.
+    Two separate queries (power, irradiance). Uses diff-based kWh — same method as live tab.
+    Cached 1 hour.
     """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings") \
-                .select("created_at,sensor,value") \
-                .in_("sensor", ["power", "irradiance"]) \
-                .gte("created_at", since) \
-                .order("created_at", desc=False) \
-                .range(offset, offset + psize - 1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception:
-        return pd.DataFrame()
+
+    def _fetch_sensor(sensor_name: str) -> list:
+        rows, psize, offset = [], 1000, 0
+        try:
+            while True:
+                res = db.table("sensor_readings") \
+                    .select("created_at,sensor,value") \
+                    .eq("sensor", sensor_name) \
+                    .gte("created_at", since) \
+                    .order("created_at", desc=False) \
+                    .range(offset, offset + psize - 1).execute()
+                batch = res.data
+                if not batch: break
+                rows.extend(batch)
+                if len(batch) < psize: break
+                offset += psize
+        except Exception:
+            pass
+        return rows
+
+    rows = _fetch_sensor("power") + _fetch_sensor("irradiance")
     if not rows:
         return pd.DataFrame()
+
     df = pd.DataFrame(rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
-    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
+
     out = []
     for date, grp in df.groupby("date"):
-        pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
+        # Energy: same diff method as live tab bar charts
+        pwr = grp[grp["sensor"] == "power"].sort_values("created_at").copy()
         irr = grp[grp["sensor"] == "irradiance"]
         if len(pwr) >= 2:
-            import numpy as np
-            times = pwr["created_at"].astype("int64").values / 1e9 / 3600
-            fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
-            kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
+            pwr["dt_h"] = pwr["created_at"].diff().dt.total_seconds().fillna(0) / 3600
+            kwh = float(max(0.0, (pwr["value"] * pwr["dt_h"]).sum()))
         else:
             kwh = 0.0
         peak_irr = float(irr["value"].max()) if not irr.empty else 0.0
@@ -860,12 +865,11 @@ with tab_live:
 with tab_hist:
     today = datetime.now(SWE).date()
 
-    # ── Översikt (visuell referens — 90 dagar) ────────────────
-    df_daily = fetch_daily_summary(days=90)
+    # ── Översikt (visuell referens — senaste 30 dagarna) ─────
+    df_daily = fetch_daily_summary(days=30)
     if not df_daily.empty:
-        st.markdown('<div class="section-title">Översikt — senaste 90 dagarna</div>',
+        st.markdown('<div class="section-title">Översikt — senaste 30 dagarna</div>',
                     unsafe_allow_html=True)
-        # Ensure date column is proper date strings (YYYY-MM-DD), not datetimes
         df_daily = df_daily.copy()
         df_daily["date_str"] = df_daily["date"].apply(lambda d: str(d)[:10])
         fig_ov = go.Figure()
@@ -877,8 +881,7 @@ with tab_hist:
         fig_ov.add_trace(go.Scatter(
             x=df_daily["date_str"], y=df_daily["peak_irr"] / 150,
             name="Toppinstrålning", mode="lines",
-            line=dict(color=AMBER, width=1.5),
-            yaxis="y2",
+            line=dict(color=AMBER, width=1.5), yaxis="y2",
             hovertemplate="<b>%{x}</b><br>%{customdata:.0f} W/m²<extra></extra>",
             customdata=df_daily["peak_irr"],
         ))
@@ -898,38 +901,47 @@ with tab_hist:
         )
         st.plotly_chart(fig_ov, use_container_width=True,
                         config={"displayModeBar": False, "scrollZoom": False})
-        st.caption("Använd grafen som referens — välj sedan period nedan och klicka Ladda data.")
+        st.caption("Teal = daglig energi (kWh) · Amber = toppinstrålning. "
+                   "Välj period nedan och klicka Ladda data.")
 
-    # ── Datumintervall + ladda-knapp ──────────────────────────
-    col_from, col_to, col_btn = st.columns([2, 2, 1])
-    with col_from:
-        date_from = st.date_input("Från", value=today - timedelta(days=7),
-                                  max_value=today, key="hist_from")
-    with col_to:
-        date_to = st.date_input("Till", value=today,
-                                min_value=date_from, max_value=today, key="hist_to")
-    with col_btn:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        load_clicked = st.button("⬇ Ladda data", use_container_width=True, type="primary")
+    # ── Datumformulär — ingen rerun förrän knappen trycks ────
+    with st.form("hist_form"):
+        col_from, col_to, col_btn = st.columns([2, 2, 1])
+        with col_from:
+            date_from = st.date_input("Från", value=today - timedelta(days=7),
+                                      max_value=today)
+        with col_to:
+            date_to = st.date_input("Till", value=today,
+                                    max_value=today)
+        with col_btn:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            submitted = st.form_submit_button("⬇ Ladda data", use_container_width=True,
+                                              type="primary")
 
-    if load_clicked:
-        dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
-        with st.spinner(T["loading_hist"]):
-            st.session_state["hist_df"]      = fetch_history_range(dt_from, dt_to)
-            st.session_state["hist_smhi_df"] = fetch_smhi_history(hours_back)
+    if submitted:
+        if date_from > date_to:
+            st.warning("'Från' måste vara före 'Till'.")
+        else:
+            dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+            dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+            hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
+            with st.spinner(T["loading_hist"]):
+                st.session_state["hist_df"]      = fetch_history_range(dt_from, dt_to)
+                st.session_state["hist_smhi_df"] = fetch_smhi_history(hours_back)
+                st.session_state["hist_from"]    = date_from
+                st.session_state["hist_to"]      = date_to
 
-    # Show prompt until data has been loaded at least once
     if "hist_df" not in st.session_state:
         st.info("Välj period ovan och klicka **Ladda data**.")
     else:
         df_hist   = st.session_state["hist_df"]
         df_smhi_h = st.session_state["hist_smhi_df"]
+        loaded_from = st.session_state.get("hist_from", "?")
+        loaded_to   = st.session_state.get("hist_to",   "?")
+        st.caption(f"Visar data: **{loaded_from}** → **{loaded_to}**")
 
-        # dt_from/dt_to still needed downstream for some charts
-        dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_from    = datetime.combine(loaded_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+        dt_to      = datetime.combine(loaded_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
         hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
         if df_hist.empty:
