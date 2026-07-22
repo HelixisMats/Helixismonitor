@@ -82,6 +82,20 @@ LANG = {
         "raw_export":"Raw data & export","download_csv":"Download CSV",
         "analysis_period":"Analysis period",
         "loading_smhi":"Loading SMHI station data…","loading_strang":"Loading STRÅNG model data…",
+        "overview_title":"Overview — click to select a period",
+        "overview_caption":"Yellow line = peak irradiance (W/m²). Blue bars = daily energy (kWh). Select a period with the date pickers below.",
+        "date_from":"From","date_to":"To","peak_irr_lbl":"Peak irradiance","energy_kwh_lbl":"Energy (kWh)",
+        "no_data_db":"No data in the database.","no_data_available":"No data available.",
+        "no_data_last_day":"No data in the last 24 hours.",
+        "recent_2days":"Sun & Power — last two days with data",
+        "last_day_system":"Last 24 hours — temperatures & system",
+        "today_lbl":"Today","yesterday_lbl":"Yesterday","window":"window",
+        "no_values_for_days":"Data exists but no irradiance/power values for {a} or {b}.",
+        "col_sensor":"Sensor","col_min":"Min","col_max":"Max","col_mean":"Mean",
+        "energy_window_help":"Energy in the selected history window only (not necessarily from midnight).",
+        "about_spec":"System specification","about_location":"Geographic location",
+        "about_aerial":"Aerial photo — Eket","about_add_img":"Add eket_aerial.png to the repo to show the aerial photo.",
+        "about_coords":"Coordinates","about_alt":"Altitude a.s.l.","about_region":"Region",
     },
     "sv": {
         "live":"Live","history":"Historik","smhi":"SMHI","about":"Om",
@@ -117,6 +131,20 @@ LANG = {
         "raw_export":"Rådata & export","download_csv":"Ladda ner CSV",
         "analysis_period":"Analysperiod",
         "loading_smhi":"Hämtar SMHI stationsdata…","loading_strang":"Hämtar STRÅNG modelldata…",
+        "overview_title":"Översikt — klicka för att välja period",
+        "overview_caption":"Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). Välj period med datumväljarna nedan.",
+        "date_from":"Från","date_to":"Till","peak_irr_lbl":"Toppinstrålning","energy_kwh_lbl":"Energi (kWh)",
+        "no_data_db":"Ingen data i databasen.","no_data_available":"Ingen data tillgänglig.",
+        "no_data_last_day":"Ingen data senaste dygnet.",
+        "recent_2days":"Sol & Effekt — senaste två dagarna",
+        "last_day_system":"Senaste dygnet — temperaturer & system",
+        "today_lbl":"Idag","yesterday_lbl":"Igår","window":"fönster",
+        "no_values_for_days":"Data finns men inga irradiance/power-värden för {a} eller {b}.",
+        "col_sensor":"Sensor","col_min":"Min","col_max":"Max","col_mean":"Medel",
+        "energy_window_help":"Energi endast i det valda historikfönstret (inte nödvändigtvis från midnatt).",
+        "about_spec":"Systemspecifikation","about_location":"Geografisk placering",
+        "about_aerial":"Flygfoto — Eket","about_add_img":"Lägg till eket_aerial.png i repot för att visa flygfoto.",
+        "about_coords":"Koordinater","about_alt":"Höjd ö.h.","about_region":"Region",
     },
 }
 
@@ -866,23 +894,23 @@ with tab_live:
             e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
 
         # ── Sol & Effekt — senaste två dagarna med data ───────
-        st.markdown('<div class="section-title">Sol & Effekt — senaste två dagarna</div>',
+        st.markdown(f'<div class="section-title">{T["recent_2days"]}</div>',
                     unsafe_allow_html=True)
         df_48h = fetch_history(168)  # 7 dagar — hittar senaste dagarna oavsett gap
         if df_48h.empty:
-            st.caption("Ingen data i databasen.")
+            st.caption(T["no_data_db"])
         else:
             df_48h["swe"] = df_48h["created_at"].dt.tz_convert(SWE)
             df_48h["date_d"] = df_48h["swe"].dt.date
             # Hitta de två senaste dagarna som faktiskt har data
             available_days = sorted(df_48h["date_d"].unique(), reverse=True)
             if len(available_days) == 0:
-                st.caption("Ingen data tillgänglig.")
+                st.caption(T["no_data_available"])
             else:
                 day_a = available_days[0]                                  # senaste
                 day_b = available_days[1] if len(available_days) > 1 else None  # näst senaste
-                label_a = "Idag" if day_a == datetime.now(SWE).date() else str(day_a)
-                label_b = ("Igår" if day_b and day_b == datetime.now(SWE).date() - timedelta(days=1)
+                label_a = T["today_lbl"] if day_a == datetime.now(SWE).date() else str(day_a)
+                label_b = (T["yesterday_lbl"] if day_b and day_b == datetime.now(SWE).date() - timedelta(days=1)
                            else str(day_b)) if day_b else None
 
                 fig_cmp = go.Figure()
@@ -932,19 +960,19 @@ with tab_live:
                                     config={"scrollZoom": True, "displayModeBar": True,
                                             "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
                 else:
-                    st.caption(f"Data finns men inga irradiance/power-värden för {label_a} eller {label_b}.")
+                    st.caption(T["no_values_for_days"].format(a=label_a, b=label_b))
 
         # ── Senaste dygnet — temperaturer, ΔT, flöde & tryck (24h) ──
         # Kontinuerlig tidslinje för alla övriga värden. Lokal tid (naive_swe).
-        st.markdown('<div class="section-title">Senaste dygnet — temperaturer & system</div>',
+        st.markdown(f'<div class="section-title">{T["last_day_system"]}</div>',
                     unsafe_allow_html=True)
         if df_48h.empty:
-            st.caption("Ingen data i databasen.")
+            st.caption(T["no_data_db"])
         else:
             cutoff24 = datetime.now(timezone.utc) - timedelta(hours=24)
             df_24 = df_48h[df_48h["created_at"] >= cutoff24].copy()
             if df_24.empty:
-                st.caption("Ingen data senaste dygnet.")
+                st.caption(T["no_data_last_day"])
             else:
                 # Chart 1 — Temperaturer
                 temp_names = {"temp_right_coll":T["collector_r"],"temp_left_coll":T["collector_l"],
@@ -1024,17 +1052,17 @@ with tab_hist:
 
     df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
-        st.markdown('<div class="section-title">Översikt — klicka för att välja period</div>',
+        st.markdown(f'<div class="section-title">{T["overview_title"]}</div>',
                     unsafe_allow_html=True)
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Bar(
             x=df_daily["date"].astype(str), y=df_daily["kwh"],
-            name="Energi (kWh)", marker_color=TEAL,
+            name=T["energy_kwh_lbl"], marker_color=TEAL,
             hovertemplate="<b>%{x}</b><br>%{y:.2f} kWh<extra></extra>",
         ))
         fig_ov.add_trace(go.Scatter(
             x=df_daily["date"].astype(str), y=df_daily["peak_irr"] / 150,
-            name="Toppinstrålning", mode="lines",
+            name=T["peak_irr_lbl"], mode="lines",
             line=dict(color=AMBER, width=1.5),
             yaxis="y2",
             hovertemplate="<b>%{x}</b><br>%{customdata:.0f} W/m²<extra></extra>",
@@ -1056,16 +1084,15 @@ with tab_hist:
                              tickangle=-45)
         st.plotly_chart(fig_ov, use_container_width=True,
                         config={"displayModeBar": False, "scrollZoom": False})
-        st.caption("Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). "
-                   "Välj period med datumväljarna nedan.")
+        st.caption(T["overview_caption"])
 
     # ── Datumintervall ────────────────────────────────────────
     col_from, col_to = st.columns(2)
     with col_from:
-        date_from = st.date_input("Från", value=today - timedelta(days=7),
+        date_from = st.date_input(T["date_from"], value=today - timedelta(days=7),
                                   max_value=today, key="hist_from")
     with col_to:
-        date_to = st.date_input("Till", value=today,
+        date_to = st.date_input(T["date_to"], value=today,
                                 min_value=date_from, max_value=today, key="hist_to")
 
     # Convert to UTC datetimes covering full days in Swedish time
@@ -1099,7 +1126,7 @@ with tab_hist:
         }
 
         # ── 1. Sol, Effekt & Väder (kombinerad graf med dubbel y-axel) ──
-        st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
+        st.markdown(f'<div class="section-title">{T["section_solar"]}</div>',
                     unsafe_allow_html=True)
         fig_solar = go.Figure()
         # Vänster axel: instrålning W/m²
@@ -1147,7 +1174,7 @@ with tab_hist:
         st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 2. Temperaturer & Tryck ──────────────────────────
-        st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
+        st.markdown(f'<div class="section-title">{T["section_temps_pressure"]}</div>',
                     unsafe_allow_html=True)
         temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
         fig_temp = go.Figure()
@@ -1181,7 +1208,7 @@ with tab_hist:
         st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
-        st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
+        st.markdown(f'<div class="section-title">{T["section_dt_flow"]}</div>',
                     unsafe_allow_html=True)
         fig_dt = go.Figure()
         # Left axis: ΔT
@@ -1226,12 +1253,12 @@ with tab_hist:
         st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
         # ── 4. Sammanfattning & Energi ────────────────────────
-        st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
+        st.markdown(f'<div class="section-title">{T["section_summary"]}</div>',
                     unsafe_allow_html=True)
         all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
         piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
             .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
-        piv.columns = ["Sensor","Min","Max","Medel"]
+        piv.columns = [T["col_sensor"],T["col_min"],T["col_max"],T["col_mean"]]
         sensor_order = all_sensors
         piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
                                            if s in sensor_order else 99)
@@ -1248,7 +1275,7 @@ with tab_hist:
             help=T["trap_help"])
         ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
             fmt(ep_window, 3, "kWh"),
-            help="Energy in the selected history window only (not necessarily from midnight).")
+            help=T["energy_window_help"])
         ec2.metric(T["heat_sensor_total"],
                    fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
                    help=T["heat_help"])
@@ -2092,7 +2119,7 @@ if is_internal and tab_smhi is not None:
 with tab_om:
     c_sys, c_map = st.columns([1, 1])
     with c_sys:
-        st.markdown(f"<div class='section-title'>Systemspecifikation</div>",
+        st.markdown(f"<div class='section-title'>{T['about_spec']}</div>",
                     unsafe_allow_html=True)
         st.markdown(f"""<div style='font-size:.85rem;color:{MUTED};line-height:2.1'>
 <b style='color:{TEXT}'>Helixis LC12 HW</b><br>
@@ -2102,23 +2129,23 @@ Peak output: 9.2 kW @ 1000 W/m²<br>
 Max temp: 160°C · Max pressure: 6 bar
 </div>""", unsafe_allow_html=True)
 
-        st.markdown(f"<div class='section-title' style='margin-top:24px'>Geografisk placering</div>",
+        st.markdown(f"<div class='section-title' style='margin-top:24px'>{T['about_location']}</div>",
                     unsafe_allow_html=True)
         st.markdown(f"""<div style='font-size:.85rem;color:{MUTED};line-height:2.1'>
 <b style='color:{TEXT}'>Eket, Örkelljunga</b><br>
-Koordinater: 56.248°N · 13.192°E<br>
-Höjd ö.h.: ~130 m<br>
-Region: Skåne
+{T['about_coords']}: 56.248°N · 13.192°E<br>
+{T['about_alt']}: ~130 m<br>
+{T['about_region']}: Skåne
 </div>""", unsafe_allow_html=True)
 
     with c_map:
-        st.markdown(f"<div class='section-title'>Flygfoto — Eket</div>",
+        st.markdown(f"<div class='section-title'>{T['about_aerial']}</div>",
                     unsafe_allow_html=True)
         if os.path.exists("eket_aerial.png"):
             st.image("eket_aerial.png", caption="Eket, Örkelljunga · © Google Maps",
                      use_container_width=True)
         else:
-            st.info("Lägg till eket_aerial.png i repot för att visa flygfoto.")
+            st.info(T['about_add_img'])
 
 # ── Sidebar (minimal) ─────────────────────────────────────────
 with st.sidebar:
