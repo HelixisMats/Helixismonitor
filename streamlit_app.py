@@ -229,49 +229,44 @@ def fetch_history_range(date_from, date_to) -> pd.DataFrame:
     return df.sort_values("created_at")
 
 @st.cache_data(ttl=3600)
-def fetch_daily_summary(days: int = 30) -> pd.DataFrame:
+def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
     """
-    Fetch daily aggregates for the overview chart.
-    Two separate queries (power, irradiance). Uses diff-based kWh — same method as live tab.
-    Cached 1 hour.
+    Fetch daily aggregates for overview chart — one row per day per sensor.
+    Only pulls power + irradiance. Much lighter than raw data.
+    Cached 1 hour — used only for the coarse date-selection overview.
     """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    def _fetch_sensor(sensor_name: str) -> list:
-        rows, psize, offset = [], 1000, 0
-        try:
-            while True:
-                res = db.table("sensor_readings") \
-                    .select("created_at,sensor,value") \
-                    .eq("sensor", sensor_name) \
-                    .gte("created_at", since) \
-                    .order("created_at", desc=False) \
-                    .range(offset, offset + psize - 1).execute()
-                batch = res.data
-                if not batch: break
-                rows.extend(batch)
-                if len(batch) < psize: break
-                offset += psize
-        except Exception:
-            pass
-        return rows
-
-    rows = _fetch_sensor("power") + _fetch_sensor("irradiance")
+    rows, psize, offset = [], 1000, 0
+    try:
+        while True:
+            res = db.table("sensor_readings") \
+                .select("created_at,sensor,value") \
+                .in_("sensor", ["power", "irradiance"]) \
+                .gte("created_at", since) \
+                .order("created_at", desc=False) \
+                .range(offset, offset + psize - 1).execute()
+            batch = res.data
+            if not batch: break
+            rows.extend(batch)
+            if len(batch) < psize: break
+            offset += psize
+    except Exception:
+        return pd.DataFrame()
     if not rows:
         return pd.DataFrame()
-
     df = pd.DataFrame(rows)
     df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
-
+    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
     out = []
     for date, grp in df.groupby("date"):
-        # Energy: same diff method as live tab bar charts
-        pwr = grp[grp["sensor"] == "power"].sort_values("created_at").copy()
+        pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
         irr = grp[grp["sensor"] == "irradiance"]
         if len(pwr) >= 2:
-            pwr["dt_h"] = pwr["created_at"].diff().dt.total_seconds().fillna(0) / 3600
-            kwh = float(max(0.0, (pwr["value"] * pwr["dt_h"]).sum()))
+            import numpy as np
+            times = pwr["created_at"].astype("int64").values / 1e9 / 3600
+            fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+            kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
         else:
             kwh = 0.0
         peak_irr = float(irr["value"].max()) if not irr.empty else 0.0
@@ -428,6 +423,19 @@ def fetch_smhi_history(hours_back: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ── Helpers ───────────────────────────────────────────────────
+def naive_swe(s):
+    """Return timestamps as tz-naive Swedish local wall-clock for Plotly.
+
+    Data is stored in UTC. Plotly.js renders datetimes in UTC and ignores the
+    timezone offset, so a tz-aware timestamp would display 2h behind (the stored
+    UTC time). We convert to the site's local time (Örkelljunga / Europe/Stockholm)
+    and drop the tz, so Plotly shows the correct local wall-clock for every viewer
+    regardless of where they are. Safe on tz-naive input too."""
+    try:
+        return s.dt.tz_convert(SWE).dt.tz_localize(None)
+    except (TypeError, AttributeError):
+        return s  # already tz-naive
+
 def latest_val(df, sensor):
     sub = df[df["sensor"] == sensor]
     return float(sub["value"].iloc[-1]) if not sub.empty else None
@@ -857,441 +865,576 @@ with tab_live:
             e1.metric(T["energy_today_trap"], fmt(energy_today,3,"kWh"))
             e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
 
+        # ── Sol & Effekt — senaste två dagarna med data ───────
+        st.markdown('<div class="section-title">Sol & Effekt — senaste två dagarna</div>',
+                    unsafe_allow_html=True)
+        df_48h = fetch_history(168)  # 7 dagar — hittar senaste dagarna oavsett gap
+        if df_48h.empty:
+            st.caption("Ingen data i databasen.")
+        else:
+            df_48h["swe"] = df_48h["created_at"].dt.tz_convert(SWE)
+            df_48h["date_d"] = df_48h["swe"].dt.date
+            # Hitta de två senaste dagarna som faktiskt har data
+            available_days = sorted(df_48h["date_d"].unique(), reverse=True)
+            if len(available_days) == 0:
+                st.caption("Ingen data tillgänglig.")
+            else:
+                day_a = available_days[0]                                  # senaste
+                day_b = available_days[1] if len(available_days) > 1 else None  # näst senaste
+                label_a = "Idag" if day_a == datetime.now(SWE).date() else str(day_a)
+                label_b = ("Igår" if day_b and day_b == datetime.now(SWE).date() - timedelta(days=1)
+                           else str(day_b)) if day_b else None
+
+                fig_cmp = go.Figure()
+                has_traces = False
+                for sensor, color, name, yaxis in [
+                    ("irradiance", AMBER, T["irr_lbl"],   "y"),
+                    ("power",      RUST,  T["power_lbl"], "y2"),
+                ]:
+                    sub = df_48h[df_48h["sensor"] == sensor].copy()
+                    if sub.empty:
+                        continue
+                    for day, dash, opacity, lbl in [
+                        (day_a, "solid", 1.0,  label_a),
+                        (day_b, "dot",   0.5,  label_b),
+                    ]:
+                        if day is None:
+                            continue
+                        day_sub = sub[sub["date_d"] == day].copy()
+                        if day_sub.empty:
+                            continue
+                        day_sub["time_str"] = day_sub["swe"].dt.strftime("%H:%M")
+                        fig_cmp.add_trace(go.Scatter(
+                            x=day_sub["time_str"], y=day_sub["value"],
+                            name=f"{name} — {lbl}", mode="lines",
+                            line=dict(width=1.8, color=color, dash=dash),
+                            opacity=opacity, yaxis=yaxis,
+                            hovertemplate=f"<b>%{{x}}</b><br>%{{y:.1f}}<extra>{name} {lbl}</extra>",
+                        ))
+                        has_traces = True
+
+                if has_traces:
+                    fig_cmp.update_layout(
+                        height=300, margin=dict(l=0, r=70, t=10, b=0),
+                        hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    font=dict(size=10, color=MUTED, family="Inter")),
+                        xaxis=dict(showgrid=False, color=MUTED, tickfont=dict(size=10)),
+                        yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                                   tickfont=dict(color=AMBER), gridcolor=BORDER),
+                        yaxis2=dict(title=dict(text="kW", font=dict(color=RUST)),
+                                    tickfont=dict(color=RUST), overlaying="y",
+                                    side="right", showgrid=False),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"),
+                    )
+                    st.plotly_chart(fig_cmp, use_container_width=True,
+                                    config={"scrollZoom": True, "displayModeBar": True,
+                                            "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+                else:
+                    st.caption(f"Data finns men inga irradiance/power-värden för {label_a} eller {label_b}.")
+
+        # ── Senaste dygnet — temperaturer, ΔT, flöde & tryck (24h) ──
+        # Kontinuerlig tidslinje för alla övriga värden. Lokal tid (naive_swe).
+        st.markdown('<div class="section-title">Senaste dygnet — temperaturer & system</div>',
+                    unsafe_allow_html=True)
+        if df_48h.empty:
+            st.caption("Ingen data i databasen.")
+        else:
+            cutoff24 = datetime.now(timezone.utc) - timedelta(hours=24)
+            df_24 = df_48h[df_48h["created_at"] >= cutoff24].copy()
+            if df_24.empty:
+                st.caption("Ingen data senaste dygnet.")
+            else:
+                # Chart 1 — Temperaturer
+                temp_names = {"temp_right_coll":T["collector_r"],"temp_left_coll":T["collector_l"],
+                              "temp_forward":T["forward"],"temp_return":T["return"],"temp_tank":T["tank"]}
+                temp_cmap  = {"temp_right_coll":RUST,"temp_left_coll":AMBER,"temp_forward":"#C1440E",
+                              "temp_return":SLATE,"temp_tank":TEAL}
+                fig24_t = go.Figure()
+                for s in ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]:
+                    sub = df_24[df_24["sensor"] == s]
+                    if not sub.empty:
+                        fig24_t.add_trace(go.Scatter(
+                            x=naive_swe(sub["created_at"]), y=sub["value"],
+                            name=temp_names[s], mode="lines",
+                            line=dict(width=1.6, color=temp_cmap[s])))
+                fig24_t.update_layout(
+                    height=260, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                               tickfont=dict(color=TEXT), gridcolor=BORDER),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig24_t.update_xaxes(showgrid=False, color=MUTED)
+                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+                            f"text-transform:uppercase;letter-spacing:.08em;margin:4px 0'>"
+                            f"{T['temperatures']}</div>", unsafe_allow_html=True)
+                st.plotly_chart(fig24_t, use_container_width=True,
+                                config={"displayModeBar": False}, key="live24_temp")
+
+                # Chart 2 — ΔT, Flöde & Tryck
+                fig24_d = go.Figure()
+                sub_dt = df_24[df_24["sensor"] == "temp_difference"]
+                if not sub_dt.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_dt["created_at"]), y=sub_dt["value"],
+                        name="ΔT (°C)", mode="lines", line=dict(width=1.6, color=TEXT), yaxis="y"))
+                sub_fl = df_24[df_24["sensor"] == "flow"]
+                if not sub_fl.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_fl["created_at"]), y=sub_fl["value"],
+                        name=T["flow_lbl"], mode="lines", line=dict(width=1.6, color=SLATE), yaxis="y2"))
+                sub_pr = df_24[df_24["sensor"] == "pressure"]
+                if not sub_pr.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_pr["created_at"]), y=sub_pr["value"],
+                        name=T["pressure_lbl"], mode="lines",
+                        line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
+                fig24_d.update_layout(
+                    height=240, margin=dict(l=0, r=90, t=10, b=0), hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                               tickfont=dict(color=TEXT), gridcolor=BORDER),
+                    yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                                tickfont=dict(color=SLATE), overlaying="y", side="right",
+                                showgrid=False, anchor="x"),
+                    yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
+                                tickfont=dict(color=TEAL), overlaying="y", side="right",
+                                showgrid=False, anchor="free", position=1.0, range=[0, 8]),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig24_d.update_xaxes(showgrid=False, color=MUTED)
+                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+                            f"text-transform:uppercase;letter-spacing:.08em;margin:10px 0 4px'>"
+                            f"{T['section_dt_flow']}</div>", unsafe_allow_html=True)
+                st.plotly_chart(fig24_d, use_container_width=True,
+                                config={"displayModeBar": False}, key="live24_dtflow")
+
     live_dashboard()
 
 # ════════════════════════════════════════════════════════════════
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
 with tab_hist:
+    # ── Översikt — välj period ────────────────────────────────
     today = datetime.now(SWE).date()
 
-    # ── Översikt (visuell referens — senaste 30 dagarna) ─────
-    df_daily = fetch_daily_summary(days=30)
+    df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
-        st.markdown('<div class="section-title">Översikt — senaste 30 dagarna</div>',
+        st.markdown('<div class="section-title">Översikt — klicka för att välja period</div>',
                     unsafe_allow_html=True)
-        df_daily = df_daily.copy()
-        df_daily["date_str"] = df_daily["date"].apply(lambda d: str(d)[:10])
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Bar(
-            x=df_daily["date_str"], y=df_daily["kwh"],
+            x=df_daily["date"].astype(str), y=df_daily["kwh"],
             name="Energi (kWh)", marker_color=TEAL,
             hovertemplate="<b>%{x}</b><br>%{y:.2f} kWh<extra></extra>",
         ))
         fig_ov.add_trace(go.Scatter(
-            x=df_daily["date_str"], y=df_daily["peak_irr"] / 150,
+            x=df_daily["date"].astype(str), y=df_daily["peak_irr"] / 150,
             name="Toppinstrålning", mode="lines",
-            line=dict(color=AMBER, width=1.5), yaxis="y2",
+            line=dict(color=AMBER, width=1.5),
+            yaxis="y2",
             hovertemplate="<b>%{x}</b><br>%{customdata:.0f} W/m²<extra></extra>",
             customdata=df_daily["peak_irr"],
         ))
         fig_ov.update_layout(
             height=160, margin=dict(l=0, r=0, t=6, b=0),
-            hovermode="x unified",
-            xaxis=dict(type="category", showgrid=False, color=MUTED,
-                       tickfont=dict(size=9), tickangle=-45),
+            hovermode="x unified", barmode="overlay",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         font=dict(size=9, color=MUTED, family="Inter")),
-            yaxis=dict(title=dict(text="kWh", font=dict(size=9)),
-                       gridcolor=BORDER, color=MUTED, tickfont=dict(size=9)),
+            yaxis=dict(title="kWh", gridcolor=BORDER, color=MUTED,
+                       tickfont=dict(size=9), titlefont=dict(size=9)),
             yaxis2=dict(overlaying="y", side="right", showgrid=False,
                         showticklabels=False),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color=MUTED, family="Inter"),
         )
+        fig_ov.update_xaxes(showgrid=False, color=MUTED, tickfont=dict(size=9),
+                             tickangle=-45)
         st.plotly_chart(fig_ov, use_container_width=True,
                         config={"displayModeBar": False, "scrollZoom": False})
-        st.caption("Teal = daglig energi (kWh) · Amber = toppinstrålning. "
-                   "Välj period nedan och klicka Ladda data.")
+        st.caption("Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). "
+                   "Välj period med datumväljarna nedan.")
 
-    # ── Datumformulär — ingen rerun förrän knappen trycks ────
-    with st.form("hist_form"):
-        col_from, col_to, col_btn = st.columns([2, 2, 1])
-        with col_from:
-            date_from = st.date_input("Från", value=today - timedelta(days=7),
-                                      max_value=today)
-        with col_to:
-            date_to = st.date_input("Till", value=today,
-                                    max_value=today)
-        with col_btn:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            submitted = st.form_submit_button("⬇ Ladda data", use_container_width=True,
-                                              type="primary")
+    # ── Datumintervall ────────────────────────────────────────
+    col_from, col_to = st.columns(2)
+    with col_from:
+        date_from = st.date_input("Från", value=today - timedelta(days=7),
+                                  max_value=today, key="hist_from")
+    with col_to:
+        date_to = st.date_input("Till", value=today,
+                                min_value=date_from, max_value=today, key="hist_to")
 
-    if submitted:
-        if date_from > date_to:
-            st.warning("'Från' måste vara före 'Till'.")
-        else:
-            dt_from    = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-            dt_to      = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-            hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
-            with st.spinner(T["loading_hist"]):
-                st.session_state["hist_df"]      = fetch_history_range(dt_from, dt_to)
-                st.session_state["hist_smhi_df"] = fetch_smhi_history(hours_back)
-                st.session_state["hist_from"]    = date_from
-                st.session_state["hist_to"]      = date_to
+    # Convert to UTC datetimes covering full days in Swedish time
+    dt_from = datetime.combine(date_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+    dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
+    hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
-    if "hist_df" not in st.session_state:
-        st.info("Välj period ovan och klicka **Ladda data**.")
+    with st.spinner(T["loading_hist"]):
+        df_hist   = fetch_history_range(dt_from, dt_to)
+        df_smhi_h = fetch_smhi_history(hours_back)
+
+    # Data lagras i UTC. Plotly ritar datum i UTC och struntar i tidszons-offset,
+    # så vi konverterar till platsens lokala tid (Örkelljunga) och tar bort tz —
+    # då visar alla grafer nedan lokal tid. Varje graf läser från dessa två frames.
+    if not df_hist.empty:
+        df_hist = df_hist.copy()
+        df_hist["created_at"] = naive_swe(df_hist["created_at"])
+    if not df_smhi_h.empty:
+        df_smhi_h = df_smhi_h.copy()
+        df_smhi_h["created_at"] = naive_swe(df_smhi_h["created_at"])
+
+    if df_hist.empty:
+        st.warning(T["no_data_interval"])
     else:
-        df_hist   = st.session_state["hist_df"]
-        df_smhi_h = st.session_state["hist_smhi_df"]
-        loaded_from = st.session_state.get("hist_from", "?")
-        loaded_to   = st.session_state.get("hist_to",   "?")
-        st.caption(f"Visar data: **{loaded_from}** → **{loaded_to}**")
+        cmap = {
+            "temp_right_coll": RUST,  "temp_left_coll": AMBER,
+            "temp_forward":    RUST,  "temp_return":    SLATE,
+            "temp_tank":       TEAL,  "power":          RUST,
+            "flow":            SLATE, "irradiance":     AMBER,
+            "wind":            SLATE, "temp_difference": TEXT,
+        }
 
-        dt_from    = datetime.combine(loaded_from, datetime.min.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        dt_to      = datetime.combine(loaded_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
-        hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
+        # ── 1. Sol, Effekt & Väder (kombinerad graf med dubbel y-axel) ──
+        st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
+                    unsafe_allow_html=True)
+        fig_solar = go.Figure()
+        # Vänster axel: instrålning W/m²
+        # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
+        for sensor, color, name, yaxis, dash in [
+            ("irradiance", AMBER, T["irr_lbl"],  "y",  "solid"),
+            ("power",      RUST,  T["power_lbl"], "y2", "solid"),
+            ("wind",       SLATE, T["wind_lbl"],         "y2", "dot"),
+        ]:
+            sub = df_hist[df_hist["sensor"] == sensor]
+            if not sub.empty:
+                fig_solar.add_trace(go.Scatter(
+                    x=sub["created_at"], y=sub["value"],
+                    name=name, mode="lines",
+                    line=dict(width=1.8, color=color, dash=dash),
+                    yaxis=yaxis,
+                ))
+        # Overlay outside temp (SMHI) on solar chart — shows temp effect on performance
+        if not df_smhi_h.empty:
+            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+            if not sub_ot.empty:
+                fig_solar.add_trace(go.Scatter(
+                    x=sub_ot["created_at"], y=sub_ot["value"],
+                    name="Outside temp °C (SMHI)", mode="lines",
+                    line=dict(width=1.5, color="#7B5EA7", dash="dot"),
+                    yaxis="y3"))
+        fig_solar.update_layout(
+            height=340, margin=dict(l=0, r=90, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=10, color=MUTED, family="Inter")),
+            yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                       tickfont=dict(color=AMBER), gridcolor=BORDER),
+            yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
+                        tickfont=dict(color=RUST), overlaying="y", side="right",
+                        showgrid=False),
+            yaxis3=dict(title=dict(text="°C", font=dict(color="#7B5EA7")),
+                        tickfont=dict(color="#7B5EA7"), overlaying="y",
+                        side="right", anchor="free", position=1.0,
+                        showgrid=False),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"),
+        )
+        fig_solar.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-        if df_hist.empty:
-            st.warning(T["no_data_interval"])
-        else:
-            cmap = {
-                "temp_right_coll": RUST,  "temp_left_coll": AMBER,
-                "temp_forward":    RUST,  "temp_return":    SLATE,
-                "temp_tank":       TEAL,  "power":          RUST,
-                "flow":            SLATE, "irradiance":     AMBER,
-                "wind":            SLATE, "temp_difference": TEXT,
-            }
+        # ── 2. Temperaturer & Tryck ──────────────────────────
+        st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
+                    unsafe_allow_html=True)
+        temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
+        fig_temp = go.Figure()
+        for s in temp_sensors:
+            sub = df_hist[df_hist["sensor"] == s]
+            if not sub.empty:
+                names_map = {"temp_right_coll":"Collector R","temp_left_coll":"Collector L",
+                             "temp_forward":"Forward","temp_return":"Return","temp_tank":"Tank"}
+                fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
+                    name=names_map[s], mode="lines",
+                    line=dict(width=1.8, color=cmap[s]), yaxis="y"))
+        # Outside temperature from SMHI (Helsingborg station)
+        if not df_smhi_h.empty:
+            sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
+            if not sub_ot.empty:
+                fig_temp.add_trace(go.Scatter(
+                    x=sub_ot["created_at"], y=sub_ot["value"],
+                    name="Outside temp (SMHI)", mode="lines",
+                    line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
+        fig_temp.update_layout(
+            height=320, margin=dict(l=0, r=10, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=10, color=MUTED, family="Inter")),
+            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                       tickfont=dict(color=TEXT), gridcolor=BORDER),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"),
+        )
+        fig_temp.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-            # ── 1. Sol, Effekt & Väder (kombinerad graf med dubbel y-axel) ──
-            st.markdown('<div class="section-title">Sol, Effekt & Väder</div>',
-                        unsafe_allow_html=True)
-            fig_solar = go.Figure()
-            # Vänster axel: instrålning W/m²
-            # Höger axel: effekt kW och vind m/s (liknande skala 0-10)
-            for sensor, color, name, yaxis, dash in [
-                ("irradiance", AMBER, T["irr_lbl"],  "y",  "solid"),
-                ("power",      RUST,  T["power_lbl"], "y2", "solid"),
-                ("wind",       SLATE, T["wind_lbl"],         "y2", "dot"),
-            ]:
-                sub = df_hist[df_hist["sensor"] == sensor]
-                if not sub.empty:
-                    fig_solar.add_trace(go.Scatter(
-                        x=sub["created_at"], y=sub["value"],
-                        name=name, mode="lines",
-                        line=dict(width=1.8, color=color, dash=dash),
-                        yaxis=yaxis,
-                    ))
-            # Overlay outside temp (SMHI) on solar chart — shows temp effect on performance
-            if not df_smhi_h.empty:
-                sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
-                if not sub_ot.empty:
-                    fig_solar.add_trace(go.Scatter(
-                        x=sub_ot["created_at"], y=sub_ot["value"],
-                        name="Outside temp °C (SMHI)", mode="lines",
-                        line=dict(width=1.5, color="#7B5EA7", dash="dot"),
-                        yaxis="y3"))
-            fig_solar.update_layout(
-                height=340, margin=dict(l=0, r=90, t=10, b=0),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            font=dict(size=10, color=MUTED, family="Inter")),
-                yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
-                           tickfont=dict(color=AMBER), gridcolor=BORDER),
-                yaxis2=dict(title=dict(text="kW / m/s", font=dict(color=RUST)),
-                            tickfont=dict(color=RUST), overlaying="y", side="right",
-                            showgrid=False),
-                yaxis3=dict(title=dict(text="°C", font=dict(color="#7B5EA7")),
-                            tickfont=dict(color="#7B5EA7"), overlaying="y",
-                            side="right", anchor="free", position=1.0,
-                            showgrid=False),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"),
-            )
-            fig_solar.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
+        st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
+                    unsafe_allow_html=True)
+        fig_dt = go.Figure()
+        # Left axis: ΔT
+        sub_dt = df_hist[df_hist["sensor"] == "temp_difference"]
+        if not sub_dt.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_dt["created_at"], y=sub_dt["value"],
+                name="ΔT (°C)", mode="lines",
+                line=dict(width=1.8, color=TEXT), yaxis="y"))
+        # Right axis (inner): Flow m³/h
+        sub_fl = df_hist[df_hist["sensor"] == "flow"]
+        if not sub_fl.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_fl["created_at"], y=sub_fl["value"],
+                name=T["flow_lbl"], mode="lines",
+                line=dict(width=1.8, color=SLATE), yaxis="y2"))
+        # Right axis (outer): Pressure bar
+        sub_pr = df_hist[df_hist["sensor"] == "pressure"]
+        if not sub_pr.empty:
+            fig_dt.add_trace(go.Scatter(
+                x=sub_pr["created_at"], y=sub_pr["value"],
+                name=T["pressure_lbl"], mode="lines",
+                line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
+        fig_dt.update_layout(
+            height=280, margin=dict(l=0, r=90, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        font=dict(size=10, color=MUTED, family="Inter")),
+            yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                       tickfont=dict(color=TEXT), gridcolor=BORDER),
+            yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                        tickfont=dict(color=SLATE), overlaying="y", side="right",
+                        showgrid=False, anchor="x"),
+            yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
+                        tickfont=dict(color=TEAL), overlaying="y", side="right",
+                        showgrid=False, anchor="free", position=1.0,
+                        range=[0, 8]),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, family="Inter"),
+        )
+        fig_dt.update_xaxes(showgrid=False, color=MUTED)
+        st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-            # ── 2. Temperaturer & Tryck ──────────────────────────
-            st.markdown('<div class="section-title">Temperaturer & Systemtryck</div>',
-                        unsafe_allow_html=True)
-            temp_sensors = ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]
-            fig_temp = go.Figure()
-            for s in temp_sensors:
-                sub = df_hist[df_hist["sensor"] == s]
-                if not sub.empty:
-                    names_map = {"temp_right_coll":"Collector R","temp_left_coll":"Collector L",
-                                 "temp_forward":"Forward","temp_return":"Return","temp_tank":"Tank"}
-                    fig_temp.add_trace(go.Scatter(x=sub["created_at"], y=sub["value"],
-                        name=names_map[s], mode="lines",
-                        line=dict(width=1.8, color=cmap[s]), yaxis="y"))
-            # Outside temperature from SMHI (Helsingborg station)
-            if not df_smhi_h.empty:
-                sub_ot = df_smhi_h[df_smhi_h["sensor"] == "smhi_temperature"]
-                if not sub_ot.empty:
-                    fig_temp.add_trace(go.Scatter(
-                        x=sub_ot["created_at"], y=sub_ot["value"],
-                        name="Outside temp (SMHI)", mode="lines",
-                        line=dict(width=2, color="#7B5EA7", dash="dash"), yaxis="y"))
-            fig_temp.update_layout(
-                height=320, margin=dict(l=0, r=10, t=10, b=0),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            font=dict(size=10, color=MUTED, family="Inter")),
-                yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
-                           tickfont=dict(color=TEXT), gridcolor=BORDER),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"),
-            )
-            fig_temp.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        # ── 4. Sammanfattning & Energi ────────────────────────
+        st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
+                    unsafe_allow_html=True)
+        all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
+        piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
+            .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
+        piv.columns = ["Sensor","Min","Max","Medel"]
+        sensor_order = all_sensors
+        piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
+                                           if s in sensor_order else 99)
+        st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
+                     use_container_width=True, hide_index=True)
 
-            # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
-            st.markdown('<div class="section-title">ΔT, Flöde & Systemtryck</div>',
-                        unsafe_allow_html=True)
-            fig_dt = go.Figure()
-            # Left axis: ΔT
-            sub_dt = df_hist[df_hist["sensor"] == "temp_difference"]
-            if not sub_dt.empty:
-                fig_dt.add_trace(go.Scatter(
-                    x=sub_dt["created_at"], y=sub_dt["value"],
-                    name="ΔT (°C)", mode="lines",
-                    line=dict(width=1.8, color=TEXT), yaxis="y"))
-            # Right axis (inner): Flow m³/h
-            sub_fl = df_hist[df_hist["sensor"] == "flow"]
-            if not sub_fl.empty:
-                fig_dt.add_trace(go.Scatter(
-                    x=sub_fl["created_at"], y=sub_fl["value"],
-                    name=T["flow_lbl"], mode="lines",
-                    line=dict(width=1.8, color=SLATE), yaxis="y2"))
-            # Right axis (outer): Pressure bar
-            sub_pr = df_hist[df_hist["sensor"] == "pressure"]
-            if not sub_pr.empty:
-                fig_dt.add_trace(go.Scatter(
-                    x=sub_pr["created_at"], y=sub_pr["value"],
-                    name=T["pressure_lbl"], mode="lines",
-                    line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
-            fig_dt.update_layout(
-                height=280, margin=dict(l=0, r=90, t=10, b=0),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            font=dict(size=10, color=MUTED, family="Inter")),
-                yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
-                           tickfont=dict(color=TEXT), gridcolor=BORDER),
-                yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
-                            tickfont=dict(color=SLATE), overlaying="y", side="right",
-                            showgrid=False, anchor="x"),
-                yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
-                            tickfont=dict(color=TEAL), overlaying="y", side="right",
-                            showgrid=False, anchor="free", position=1.0,
-                            range=[0, 8]),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"),
-            )
-            fig_dt.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        # Energy today always uses full-day data — same source as Live tab
+        ep_today = integrate_power(fetch_today_power())
+        ep_window = integrate_power(df_hist)   # energy in selected window only
 
-            # ── 4. Sammanfattning & Energi ────────────────────────
-            st.markdown('<div class="section-title">Sammanfattning för perioden</div>',
-                        unsafe_allow_html=True)
-            all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
-            piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
-                .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
-            piv.columns = ["Sensor","Min","Max","Medel"]
-            sensor_order = all_sensors
-            piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
-                                               if s in sensor_order else 99)
-            st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
-                         use_container_width=True, hide_index=True)
+        st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric(T["energy_today_trap"], fmt(ep_today, 3, "kWh"),
+            help=T["trap_help"])
+        ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
+            fmt(ep_window, 3, "kWh"),
+            help="Energy in the selected history window only (not necessarily from midnight).")
+        ec2.metric(T["heat_sensor_total"],
+                   fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
+                   help=T["heat_help"])
 
-            # Energy today always uses full-day data — same source as Live tab
-            ep_today = integrate_power(fetch_today_power())
-            ep_window = integrate_power(df_hist)   # energy in selected window only
+        # ── Temporary: Three-method power correlation ────────────
+        with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
+            st.markdown(f"""
+**M1 — Power sensor:** Direct `power` reading, kW.
+**M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
+**M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
 
-            st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
-            ec1, ec2, ec3 = st.columns(3)
-            ec1.metric(T["energy_today_trap"], fmt(ep_today, 3, "kWh"),
-                help=T["trap_help"])
-            ec2.metric(f"{T['energy_today_trap']} ({T['history']} window)",
-                fmt(ep_window, 3, "kWh"),
-                help="Energy in the selected history window only (not necessarily from midnight).")
-            ec2.metric(T["heat_sensor_total"],
-                       fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
-                       help=T["heat_help"])
+**Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
+If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
+Ratio M1/M2 reveals the actual cp of the fluid.
+""")
+            RHO = 1000
+            CP_DEFAULT = 3800
 
-            # ── Temporary: Three-method power correlation ────────────
-            with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
-                st.markdown(f"""
-    **M1 — Power sensor:** Direct `power` reading, kW.
-    **M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
-    **M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
+            # cp slider — always visible so it drives both charts
+            cp_val = st.slider("cp (J/kg·K) — adjust to match M1 vs M2",
+                               min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
+                               help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
 
-    **Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
-    If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
-    Ratio M1/M2 reveals the actual cp of the fluid.
-    """)
-                RHO = 1000
-                CP_DEFAULT = 3800
+            sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
+            dfs = {}
+            for s in sensors_needed:
+                sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
+                sub = sub.rename(columns={"value": s}).set_index("created_at")
+                dfs[s] = sub
 
-                # cp slider — always visible so it drives both charts
-                cp_val = st.slider("cp (J/kg·K) — adjust to match M1 vs M2",
-                                   min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
-                                   help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
+            if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
+                base = dfs["flow"]
+                for s in ["temp_forward","temp_return","power","heat_energy"]:
+                    if s in dfs and not dfs[s].empty:
+                        base = pd.merge_asof(
+                            base.sort_index().reset_index(),
+                            dfs[s].sort_index().reset_index(),
+                            on="created_at", tolerance=pd.Timedelta("2min")
+                        ).set_index("created_at")
+                base = base.dropna(subset=["flow","temp_forward","temp_return"])
 
-                sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
-                dfs = {}
-                for s in sensors_needed:
-                    sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
-                    sub = sub.rename(columns={"value": s}).set_index("created_at")
-                    dfs[s] = sub
+                # M2 with selected cp
+                base["p_physics"] = (
+                    base["flow"] / 3600 * RHO * cp_val *
+                    (base["temp_forward"] - base["temp_return"])
+                ) / 1000
 
-                if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
-                    base = dfs["flow"]
-                    for s in ["temp_forward","temp_return","power","heat_energy"]:
-                        if s in dfs and not dfs[s].empty:
-                            base = pd.merge_asof(
-                                base.sort_index().reset_index(),
-                                dfs[s].sort_index().reset_index(),
-                                on="created_at", tolerance=pd.Timedelta("2min")
-                            ).set_index("created_at")
-                    base = base.dropna(subset=["flow","temp_forward","temp_return"])
+                # M3: cumulative delta from t₀ in kWh
+                if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
+                    e0 = float(base["heat_energy"].dropna().iloc[0])
+                    base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
 
-                    # M2 with selected cp
-                    base["p_physics"] = (
-                        base["flow"] / 3600 * RHO * cp_val *
-                        (base["temp_forward"] - base["temp_return"])
-                    ) / 1000
-
-                    # M3: cumulative delta from t₀ in kWh
-                    if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
-                        e0 = float(base["heat_energy"].dropna().iloc[0])
-                        base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
-
-                    # ── Instantaneous power chart (M1 vs M2) ──────────
-                    st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
-                                unsafe_allow_html=True)
-                    fig_pwr = go.Figure()
-                    if "power" in base.columns:
-                        fig_pwr.add_trace(go.Scatter(
-                            x=base.index, y=base["power"],
-                            name="M1: power sensor (kW)",
-                            mode="lines", line=dict(color=RUST, width=2)))
+                # ── Instantaneous power chart (M1 vs M2) ──────────
+                st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
+                            unsafe_allow_html=True)
+                fig_pwr = go.Figure()
+                if "power" in base.columns:
                     fig_pwr.add_trace(go.Scatter(
-                        x=base.index, y=base["p_physics"],
-                        name=f"M2: flow×ΔT (kW, cp={cp_val})",
-                        mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
-                    fig_pwr.update_layout(
-                        height=260, margin=dict(l=0,r=0,t=10,b=0),
-                        yaxis_title="kW", hovermode="x unified",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                    font=dict(size=10, color=MUTED, family="Inter")),
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color=MUTED, family="Inter"))
-                    fig_pwr.update_xaxes(showgrid=False, color=MUTED)
-                    fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-                    st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
-
-                    # ── Correlation metrics ────────────────────────────
-                    if "power" in base.columns:
-                        both = base[["power","p_physics"]].dropna()
-                        if len(both) > 10:
-                            corr  = both["power"].corr(both["p_physics"])
-                            ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
-                            implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
-                            c1, c2, c3, c4 = st.columns(4)
-                            c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
-                                help=">0.99 = power is calculated from flow×ΔT in controller")
-                            c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
-                                help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
-                            c3.metric("cp used", f"{cp_val} J/kg·K")
-                            c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
-                                help="The cp value that would make M2 exactly match M1")
-                            if corr > 0.99:
-                                st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
-                                        "internally. M1 and M2 are **not independent**.")
-                            elif corr > 0.95:
-                                st.warning("⚠️ 0.95–0.99 — likely same source, small calibration difference.")
-                            else:
-                                st.success("✅ <0.95 — power sensor appears to be an independent measurement.")
-
-                    # ── Cumulative energy chart (M1 + M2 + M3) ────────
-                    st.markdown(f'<div class="section-title">Cumulative energy from t₀ — all 3 methods (kWh)</div>',
-                                unsafe_allow_html=True)
-
-                    # M1 cumulative: trapezoid of power sensor
-                    pwr_sub = base["power"].dropna()
-                    times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
-                    try:
-                        import numpy as np
-                        fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
-                        cum_m1 = []
-                        t_arr = times_h.values
-                        p_arr = pwr_sub.values
-                        t0_h  = t_arr[0]
-                        for i in range(len(t_arr)):
-                            cum_m1.append(float(max(0, fn(p_arr[:i+1], t_arr[:i+1]) - t0_h * 0)))
-                        # simpler: running integral
-                        cum_m1 = [0.0]
-                        for i in range(1, len(t_arr)):
-                            cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
-                    except Exception:
-                        cum_m1 = [0.0]
-                        for i in range(1, len(t_arr)):
-                            cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
-
-                    # M2 cumulative: trapezoid of p_physics aligned to same index
-                    phy_sub = base["p_physics"].reindex(pwr_sub.index, method="nearest")
-                    ph_arr  = phy_sub.values
-                    cum_m2  = [0.0]
-                    for i in range(1, len(t_arr)):
-                        cum_m2.append(cum_m2[-1] + (ph_arr[i]+ph_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
-
-                    fig_cum = go.Figure()
-                    fig_cum.add_trace(go.Scatter(
-                        x=pwr_sub.index, y=cum_m1,
-                        name="M1 cumulative (power sensor, kWh)",
+                        x=base.index, y=base["power"],
+                        name="M1: power sensor (kW)",
                         mode="lines", line=dict(color=RUST, width=2)))
-                    fig_cum.add_trace(go.Scatter(
-                        x=pwr_sub.index, y=cum_m2,
-                        name=f"M2 cumulative (flow×ΔT cp={cp_val}, kWh)",
-                        mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+                fig_pwr.add_trace(go.Scatter(
+                    x=base.index, y=base["p_physics"],
+                    name=f"M2: flow×ΔT (kW, cp={cp_val})",
+                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+                fig_pwr.update_layout(
+                    height=260, margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis_title="kW", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig_pwr.update_xaxes(showgrid=False, color=MUTED)
+                fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
 
-                    # M3: heat_energy counter delta
-                    if "heat_kwh_delta" in base.columns:
-                        m3_sub = base["heat_kwh_delta"].dropna()
-                        if not m3_sub.empty:
-                            fig_cum.add_trace(go.Scatter(
-                                x=m3_sub.index, y=m3_sub.values,
-                                name="M3 cumulative (heat energy counter ÷1000→kWh)",
-                                mode="lines", line=dict(color=BLUE, width=2, dash="dash")))
+                # ── Correlation metrics ────────────────────────────
+                if "power" in base.columns:
+                    both = base[["power","p_physics"]].dropna()
+                    if len(both) > 10:
+                        corr  = both["power"].corr(both["p_physics"])
+                        ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
+                        implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
+                            help=">0.99 = power is calculated from flow×ΔT in controller")
+                        c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
+                            help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
+                        c3.metric("cp used", f"{cp_val} J/kg·K")
+                        c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
+                            help="The cp value that would make M2 exactly match M1")
+                        if corr > 0.99:
+                            st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
+                                    "internally. M1 and M2 are **not independent**.")
+                        elif corr > 0.95:
+                            st.warning("⚠️ 0.95–0.99 — likely same source, small calibration difference.")
+                        else:
+                            st.success("✅ <0.95 — power sensor appears to be an independent measurement.")
 
-                    fig_cum.update_layout(
-                        height=280, margin=dict(l=0,r=0,t=10,b=0),
-                        yaxis_title="kWh", hovermode="x unified",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                    font=dict(size=10, color=MUTED, family="Inter")),
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color=MUTED, family="Inter"))
-                    fig_cum.update_xaxes(showgrid=False, color=MUTED)
-                    fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
-                    st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                # ── Cumulative energy chart (M1 + M2 + M3) ────────
+                st.markdown(f'<div class="section-title">Cumulative energy from t₀ — all 3 methods (kWh)</div>',
+                            unsafe_allow_html=True)
 
-                    # Three-way end-of-window summary
-                    m1_end = cum_m1[-1] if cum_m1 else None
-                    m2_end = cum_m2[-1] if cum_m2 else None
-                    m3_end = float(base["heat_kwh_delta"].dropna().iloc[-1])                          if "heat_kwh_delta" in base.columns and not base["heat_kwh_delta"].dropna().empty else None
-                    s1, s2, s3 = st.columns(3)
-                    s1.metric("M1 total (window)", fmt(m1_end, 3, "kWh"))
-                    s2.metric("M2 total (window)", fmt(m2_end, 3, "kWh"))
-                    s3.metric("M3 delta (window)", fmt(m3_end, 3, "kWh"),
-                              help="Change in heat energy counter over this window. "
-                                   "Already ×1000 (MWh→kWh). Should match M1 if calibrated.")
-                    if m1_end and m3_end and m1_end > 0.1:
-                        m3_ratio = m3_end / m1_end
-                        st.caption(f"M3/M1 ratio: {m3_ratio:.3f} — "
-                                   f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
-                else:
-                    st.info("Need flow, temp_forward and temp_return data in selected window.")
+                # M1 cumulative: trapezoid of power sensor
+                pwr_sub = base["power"].dropna()
+                times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
+                try:
+                    import numpy as np
+                    fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+                    cum_m1 = []
+                    t_arr = times_h.values
+                    p_arr = pwr_sub.values
+                    t0_h  = t_arr[0]
+                    for i in range(len(t_arr)):
+                        cum_m1.append(float(max(0, fn(p_arr[:i+1], t_arr[:i+1]) - t0_h * 0)))
+                    # simpler: running integral
+                    cum_m1 = [0.0]
+                    for i in range(1, len(t_arr)):
+                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+                except Exception:
+                    cum_m1 = [0.0]
+                    for i in range(1, len(t_arr)):
+                        cum_m1.append(cum_m1[-1] + (p_arr[i]+p_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
 
-            with st.expander(f"📥 {T['raw_export']}"):
-                piv2 = df_hist.pivot_table(
-                    index="created_at", columns="sensor",
-                    values="value", aggfunc="last"
-                ).reset_index().sort_values("created_at", ascending=False)
-                st.dataframe(piv2.head(500), use_container_width=True)
-                st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
-                    f"helixis_{date_from}_{date_to}.csv", "text/csv")
+                # M2 cumulative: trapezoid of p_physics aligned to same index
+                phy_sub = base["p_physics"].reindex(pwr_sub.index, method="nearest")
+                ph_arr  = phy_sub.values
+                cum_m2  = [0.0]
+                for i in range(1, len(t_arr)):
+                    cum_m2.append(cum_m2[-1] + (ph_arr[i]+ph_arr[i-1])/2*(t_arr[i]-t_arr[i-1]))
+
+                fig_cum = go.Figure()
+                fig_cum.add_trace(go.Scatter(
+                    x=pwr_sub.index, y=cum_m1,
+                    name="M1 cumulative (power sensor, kWh)",
+                    mode="lines", line=dict(color=RUST, width=2)))
+                fig_cum.add_trace(go.Scatter(
+                    x=pwr_sub.index, y=cum_m2,
+                    name=f"M2 cumulative (flow×ΔT cp={cp_val}, kWh)",
+                    mode="lines", line=dict(color=TEAL, width=2, dash="dot")))
+
+                # M3: heat_energy counter delta
+                if "heat_kwh_delta" in base.columns:
+                    m3_sub = base["heat_kwh_delta"].dropna()
+                    if not m3_sub.empty:
+                        fig_cum.add_trace(go.Scatter(
+                            x=m3_sub.index, y=m3_sub.values,
+                            name="M3 cumulative (heat energy counter ÷1000→kWh)",
+                            mode="lines", line=dict(color=BLUE, width=2, dash="dash")))
+
+                fig_cum.update_layout(
+                    height=280, margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis_title="kWh", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig_cum.update_xaxes(showgrid=False, color=MUTED)
+                fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+
+                # Three-way end-of-window summary
+                m1_end = cum_m1[-1] if cum_m1 else None
+                m2_end = cum_m2[-1] if cum_m2 else None
+                m3_end = float(base["heat_kwh_delta"].dropna().iloc[-1])                          if "heat_kwh_delta" in base.columns and not base["heat_kwh_delta"].dropna().empty else None
+                s1, s2, s3 = st.columns(3)
+                s1.metric("M1 total (window)", fmt(m1_end, 3, "kWh"))
+                s2.metric("M2 total (window)", fmt(m2_end, 3, "kWh"))
+                s3.metric("M3 delta (window)", fmt(m3_end, 3, "kWh"),
+                          help="Change in heat energy counter over this window. "
+                               "Already ×1000 (MWh→kWh). Should match M1 if calibrated.")
+                if m1_end and m3_end and m1_end > 0.1:
+                    m3_ratio = m3_end / m1_end
+                    st.caption(f"M3/M1 ratio: {m3_ratio:.3f} — "
+                               f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
+            else:
+                st.info("Need flow, temp_forward and temp_return data in selected window.")
+
+        with st.expander(f"📥 {T['raw_export']}"):
+            piv2 = df_hist.pivot_table(
+                index="created_at", columns="sensor",
+                values="value", aggfunc="last"
+            ).reset_index().sort_values("created_at", ascending=False)
+            st.dataframe(piv2.head(500), use_container_width=True)
+            st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
+                f"helixis_{hours}h.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
