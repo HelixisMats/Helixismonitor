@@ -216,6 +216,41 @@ def fetch_live() -> pd.DataFrame:
     except Exception as e:
         st.error(f"DB: {e}"); return pd.DataFrame()
 
+# ── Data-down alert ───────────────────────────────────────────
+ALERT_AFTER_MIN = 30   # minutes without any sensor data before emailing
+
+@st.cache_data(ttl=25)
+def fetch_last_reading_ts():
+    """Latest sensor timestamp of ANY age (UTC). fetch_live() only looks back
+    20 min and is empty during a real outage, so the down-alert needs this."""
+    try:
+        res = db.table("sensor_readings").select("created_at") \
+            .order("created_at", desc=True).limit(1).execute()
+        if not res.data:
+            return None
+        return pd.to_datetime(res.data[0]["created_at"], utc=True)
+    except Exception:
+        return None
+
+@st.cache_resource
+def _alert_state():
+    """Shared across all browser sessions in this server process, so the outage
+    email is sent once per outage rather than once per viewer/rerun."""
+    return {}
+
+def check_data_alert(age_min: float, last_ts):
+    """Email once when data has been missing ≥ ALERT_AFTER_MIN; re-arm when it returns.
+    NOTE: only runs while the app is open in a browser — Streamlit is not a
+    background service, so this is best-effort, not guaranteed monitoring."""
+    state = _alert_state()
+    if age_min >= ALERT_AFTER_MIN:
+        key = last_ts.isoformat()          # stable during an outage (no new data)
+        if state.get("outage_alerted") != key:
+            send_alert_email(age_min)
+            state["outage_alerted"] = key
+    elif age_min < 15:                      # data flowing again → re-arm
+        state.pop("outage_alerted", None)
+
 @st.cache_data(ttl=120)
 def fetch_history(hours_back: int) -> pd.DataFrame:
     since = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
@@ -695,6 +730,15 @@ with tab_live:
     @st.fragment(run_every=30)
     def live_dashboard():
         df = fetch_live()
+
+        # Down-alert FIRST — it must run even when there is no recent data (during a
+        # real outage fetch_live() is empty and would return early). Uses the true
+        # latest timestamp regardless of the 20-min live window.
+        last_any = fetch_last_reading_ts()
+        if last_any is not None:
+            age_any = (datetime.now(timezone.utc) - last_any).total_seconds() / 60
+            check_data_alert(age_any, last_any)
+
         if df.empty:
             st.warning(T["no_data"]); return
 
@@ -714,18 +758,8 @@ with tab_live:
             f'{"· LIVE" if is_live else f"· {age_min:.0f} min sedan"}</span>',
             unsafe_allow_html=True)
 
-        # Email alert if data has been missing for 30–31 min (fires once per gap)
-        # Uses a narrow window to avoid repeat emails every 30s
-        if not is_live and 30 <= age_min < 31:
-            alert_key = f"alert_sent_{last_ts.date()}"
-            if not st.session_state.get(alert_key):
-                send_alert_email(age_min)
-                st.session_state[alert_key] = True
-        elif is_live:
-            # Reset alert state when data returns
-            for k in list(st.session_state.keys()):
-                if k.startswith("alert_sent_"):
-                    del st.session_state[k]
+        # (Down-alert is handled at the top of live_dashboard via check_data_alert,
+        #  which works even when fetch_live() is empty during an outage.)
 
         df_today_pwr  = fetch_today_power()
         energy_today  = integrate_power(df_today_pwr)
