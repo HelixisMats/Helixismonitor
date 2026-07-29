@@ -3,6 +3,12 @@ mqtt_bridge.py
 ──────────────
 Subscribes to helix/1/1234/data on eaasy.life:1883
 and inserts readings into Supabase via direct HTTP REST calls.
+
+Timestamps: uses the DEVICE'S OWN measurement timestamp (from the payload) as
+created_at when available, falling back to the bridge receive time. This is what
+keeps data correct after an outage: when a device buffers readings during a
+disconnect and floods them on reconnect, each row keeps its true measurement time
+instead of all collapsing onto the reconnect moment.
 """
 
 import os
@@ -35,7 +41,52 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
 
-SKIP_FIELDS = {"timestamp", "time", "date"}
+# Fields in the payload that are metadata, not sensor values (never stored as sensors)
+SKIP_FIELDS = {"timestamp", "time", "date", "datetime", "ts", "epoch",
+               "unixtime", "unix_time", "measured_at", "recorded_at"}
+
+# Candidate keys that may carry the device's own measurement timestamp
+TS_KEYS = ("timestamp", "time", "ts", "datetime", "date", "epoch",
+           "unixtime", "unix_time", "measured_at", "recorded_at")
+
+# Log the timestamp source only occasionally, so it is easy to verify without spam
+_ts_log_counter = {"n": 0}
+
+
+def parse_device_ts(data: dict):
+    """Return an ISO-8601 UTC string from the device's own timestamp field, or
+    None if it is absent / unparseable / implausible. Auto-detects epoch seconds,
+    epoch milliseconds and ISO-8601 strings. Never raises."""
+    if not isinstance(data, dict):
+        return None
+    for key in data:
+        if str(key).lower() not in TS_KEYS:
+            continue
+        raw = data[key]
+        try:
+            # Numeric epoch (int/float or a numeric string)
+            is_numeric_str = isinstance(raw, str) and raw.strip().replace(".", "", 1).isdigit()
+            if isinstance(raw, (int, float)) or is_numeric_str:
+                num = float(raw)
+                if num > 1e12:        # milliseconds since epoch
+                    dt = datetime.fromtimestamp(num / 1000, tz=timezone.utc)
+                elif num > 1e9:       # seconds since epoch
+                    dt = datetime.fromtimestamp(num, tz=timezone.utc)
+                else:
+                    continue          # too small to be a real epoch — skip this field
+            else:
+                # ISO-8601 string (handle trailing 'Z'; assume UTC if no offset)
+                s = str(raw).strip().replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            # Sanity check — reject unset/garbage clocks (e.g. 1970 or far future)
+            if dt.year < 2020 or dt.year > 2100:
+                continue
+            return dt.astimezone(timezone.utc).isoformat()
+        except (ValueError, TypeError, OverflowError, OSError):
+            continue
+    return None
 
 
 def insert_rows(rows):
@@ -84,12 +135,27 @@ def on_message(client, userdata, msg):
         log.error(f"Payload decode error: {e}")
         return
 
-    now = datetime.now(timezone.utc).isoformat()
+    recv_now = datetime.now(timezone.utc).isoformat()
     rows = []
 
     try:
         data = json.loads(payload)
         if isinstance(data, dict):
+            # Prefer the device's own measurement time; fall back to receive time
+            device_ts = parse_device_ts(data)
+            ts = device_ts or recv_now
+
+            # Verify/log the timestamp source occasionally (first msg, then every 500th)
+            if _ts_log_counter["n"] % 500 == 0:
+                if device_ts:
+                    log.info(f"Timestamp: using device time {device_ts} "
+                             f"(payload keys: {list(data.keys())})")
+                else:
+                    log.warning("Timestamp: NO device timestamp found — using receive "
+                                f"time. Buffered data after an outage will collapse. "
+                                f"Payload keys: {list(data.keys())}")
+            _ts_log_counter["n"] += 1
+
             for sensor, value in data.items():
                 # Keep only printable ASCII in sensor name
                 sensor_clean = "".join(c for c in sensor if 32 <= ord(c) < 128).strip()
@@ -100,17 +166,18 @@ def on_message(client, userdata, msg):
                         "sensor":     sensor_clean,
                         "value":      float(value),
                         "topic":      msg.topic,
-                        "created_at": now,
+                        "created_at": ts,
                     })
                 except (ValueError, TypeError):
                     log.debug(f"Skipping non-numeric: {sensor_clean}={value!r}")
     except json.JSONDecodeError:
+        # Non-JSON payload — no device timestamp available, use receive time
         try:
             rows.append({
                 "sensor":     msg.topic.split("/")[-1],
                 "value":      float(payload),
                 "topic":      msg.topic,
-                "created_at": now,
+                "created_at": recv_now,
             })
         except ValueError:
             log.warning(f"Could not parse payload: {payload!r}")
