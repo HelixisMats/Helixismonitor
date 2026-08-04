@@ -47,6 +47,45 @@ TEAL   = "#167A5E"; AMBER = "#B87200"; RUST = "#A83030"; SLATE = "#2E5EA0"
 LGRAY  = "#E4E7F0"
 SITE_LAT, SITE_LON = 56.248, 13.192
 
+# ── Graf-interaktion ──────────────────────────────────────────
+# Standardconfig för alla Plotly-grafer. Verktygsfältet (modebar) måste vara
+# på, annars går det inte att zooma ut igen efter en zoom-drag — knapparna
+# "Zoom out" och "Reset axes" ligger där. doubleClick="reset" gör dessutom att
+# dubbelklick/dubbeltryck alltid tar dig tillbaka till hela intervallet.
+PLOT_CONFIG = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "displaylogo": False,
+    "doubleClick": "reset",
+    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+}
+# Samma sak men utan scroll-zoom (för staplar/översikter där scroll ska
+# fortsätta scrolla sidan i mobilen).
+PLOT_CONFIG_NOSCROLL = {**PLOT_CONFIG, "scrollZoom": False}
+
+
+def add_time_controls(fig, extra_height=66):
+    """Snabbknappar för tidsintervall ovanför en datum-x-axel.
+
+    Ger en väg tillbaka ur en zoom utan att ladda om: tryck på en förvald
+    period, använd Reset axes i verktygsfältet, eller dubbelklicka i grafen.
+    """
+    fig.update_xaxes(rangeselector=dict(
+        buttons=[
+            dict(count=6,  label="6h",  step="hour", stepmode="backward"),
+            dict(count=12, label="12h", step="hour", stepmode="backward"),
+            dict(count=1,  label="24h", step="day",  stepmode="backward"),
+            dict(count=3,  label="3d",  step="day",  stepmode="backward"),
+            dict(step="all", label=T.get("btn_all", "All")),
+        ],
+        x=0, xanchor="left", y=1.30, yanchor="top",
+        bgcolor=BG2, activecolor=LGRAY, bordercolor=BORDER, borderwidth=1,
+        font=dict(size=11, color=TEXT, family="Inter"),
+    ))
+    fig.update_layout(height=(fig.layout.height or 320) + extra_height,
+                      margin=dict(t=76))
+    return fig
+
 LANG = {
     "en": {
         "live":"Live","history":"History","smhi":"SMHI","about":"About",
@@ -84,6 +123,8 @@ LANG = {
         "loading_smhi":"Loading SMHI station data…","loading_strang":"Loading STRÅNG model data…",
         "overview_title":"Overview — click to select a period",
         "overview_caption":"Yellow line = peak irradiance (W/m²). Blue bars = daily energy (kWh). Select a period with the date pickers below.",
+        "btn_all":"All",
+        "chart_hint":"Drag across a chart to zoom in. Use the preset buttons, double-click the chart, or the toolbar's reset button (top right) to zoom back out.",
         "date_from":"From","date_to":"To","peak_irr_lbl":"Peak irradiance","energy_kwh_lbl":"Energy (kWh)",
         "no_data_db":"No data in the database.","no_data_available":"No data available.",
         "no_data_last_day":"No data in the last 24 hours.",
@@ -133,6 +174,8 @@ LANG = {
         "loading_smhi":"Hämtar SMHI stationsdata…","loading_strang":"Hämtar STRÅNG modelldata…",
         "overview_title":"Översikt — klicka för att välja period",
         "overview_caption":"Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). Välj period med datumväljarna nedan.",
+        "btn_all":"Allt",
+        "chart_hint":"Dra i grafen för att zooma in. Zooma ut igen med snabbknapparna, dubbelklick i grafen, eller reset-knappen i verktygsfältet uppe till höger.",
         "date_from":"Från","date_to":"Till","peak_irr_lbl":"Toppinstrålning","energy_kwh_lbl":"Energi (kWh)",
         "no_data_db":"Ingen data i databasen.","no_data_available":"Ingen data tillgänglig.",
         "no_data_last_day":"Ingen data senaste dygnet.",
@@ -191,8 +234,20 @@ st.markdown(f"""<style>
     color:{BLUE}!important;border-bottom:2px solid {BLUE}!important;
   }}
 
-  /* Plotly toolbar hidden */
-  .modebar{{display:none!important;}}
+  /* Plotly toolbar — diskret, framhävs vid hover/tryck.
+     Får INTE döljas: det är där Zoom out / Reset axes sitter. */
+  .modebar{{
+    opacity:.4!important;transition:opacity .15s ease!important;
+    background:rgba(255,255,255,.9)!important;
+    border-radius:6px!important;
+  }}
+  .js-plotly-plot:hover .modebar,.modebar:hover{{opacity:1!important;}}
+  .modebar-btn .icon path{{fill:{MUTED}!important;}}
+  .modebar-btn:hover .icon path,
+  .modebar-btn.active .icon path{{fill:{BLUE}!important;}}
+
+  /* Snabbknappar för tidsintervall inuti graferna */
+  .rangeselector text{{font-family:Inter!important;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -861,7 +916,7 @@ with tab_live:
                             xaxis=dict(color=MUTED, showgrid=False),
                             font=dict(family="Inter", color=MUTED))
                         st.plotly_chart(fig_h, use_container_width=True,
-                            config={"displayModeBar": False})
+                            config=PLOT_CONFIG_NOSCROLL)
                     else:
                         st.caption("No data for today yet")
 
@@ -883,7 +938,7 @@ with tab_live:
                         xaxis=dict(color=MUTED, showgrid=False),
                         font=dict(family="Inter", color=MUTED))
                     st.plotly_chart(fig_d, use_container_width=True,
-                        config={"displayModeBar": False})
+                        config=PLOT_CONFIG_NOSCROLL)
 
         else:
             # ── Compact tile view ──
@@ -991,8 +1046,7 @@ with tab_live:
                         font=dict(color=MUTED, family="Inter"),
                     )
                     st.plotly_chart(fig_cmp, use_container_width=True,
-                                    config={"scrollZoom": True, "displayModeBar": True,
-                                            "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+                                    config=PLOT_CONFIG)
                 else:
                     st.caption(T["no_values_for_days"].format(a=label_a, b=label_b))
 
@@ -1034,7 +1088,7 @@ with tab_live:
                             f"text-transform:uppercase;letter-spacing:.08em;margin:4px 0'>"
                             f"{T['temperatures']}</div>", unsafe_allow_html=True)
                 st.plotly_chart(fig24_t, use_container_width=True,
-                                config={"displayModeBar": False}, key="live24_temp")
+                                config=PLOT_CONFIG, key="live24_temp")
 
                 # Chart 2 — ΔT, Flöde & Tryck
                 fig24_d = go.Figure()
@@ -1073,7 +1127,7 @@ with tab_live:
                             f"text-transform:uppercase;letter-spacing:.08em;margin:10px 0 4px'>"
                             f"{T['section_dt_flow']}</div>", unsafe_allow_html=True)
                 st.plotly_chart(fig24_d, use_container_width=True,
-                                config={"displayModeBar": False}, key="live24_dtflow")
+                                config=PLOT_CONFIG, key="live24_dtflow")
 
     live_dashboard()
 
@@ -1117,7 +1171,7 @@ with tab_hist:
         fig_ov.update_xaxes(showgrid=False, color=MUTED, tickfont=dict(size=9),
                              tickangle=-45)
         st.plotly_chart(fig_ov, use_container_width=True,
-                        config={"displayModeBar": False, "scrollZoom": False})
+                        config=PLOT_CONFIG_NOSCROLL)
         st.caption(T["overview_caption"])
 
     # ── Datumintervall ────────────────────────────────────────
@@ -1205,7 +1259,9 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_solar.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_solar, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        add_time_controls(fig_solar)
+        st.plotly_chart(fig_solar, use_container_width=True, config=PLOT_CONFIG)
+        st.caption(T["chart_hint"])
 
         # ── 2. Temperaturer & Tryck ──────────────────────────
         st.markdown(f'<div class="section-title">{T["section_temps_pressure"]}</div>',
@@ -1239,7 +1295,8 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_temp.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_temp, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        add_time_controls(fig_temp)
+        st.plotly_chart(fig_temp, use_container_width=True, config=PLOT_CONFIG)
 
         # ── 3. ΔT, Flöde & Tryck ──────────────────────────────
         st.markdown(f'<div class="section-title">{T["section_dt_flow"]}</div>',
@@ -1284,7 +1341,8 @@ with tab_hist:
             font=dict(color=MUTED, family="Inter"),
         )
         fig_dt.update_xaxes(showgrid=False, color=MUTED)
-        st.plotly_chart(fig_dt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+        add_time_controls(fig_dt)
+        st.plotly_chart(fig_dt, use_container_width=True, config=PLOT_CONFIG)
 
         # ── 4. Sammanfattning & Energi ────────────────────────
         st.markdown(f'<div class="section-title">{T["section_summary"]}</div>',
@@ -1384,7 +1442,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                     font=dict(color=MUTED, family="Inter"))
                 fig_pwr.update_xaxes(showgrid=False, color=MUTED)
                 fig_pwr.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_pwr, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                st.plotly_chart(fig_pwr, use_container_width=True, config=PLOT_CONFIG)
 
                 # ── Correlation metrics ────────────────────────────
                 if "power" in base.columns:
@@ -1469,7 +1527,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                     font=dict(color=MUTED, family="Inter"))
                 fig_cum.update_xaxes(showgrid=False, color=MUTED)
                 fig_cum.update_yaxes(gridcolor=BORDER, color=MUTED)
-                st.plotly_chart(fig_cum, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                st.plotly_chart(fig_cum, use_container_width=True, config=PLOT_CONFIG)
 
                 # Three-way end-of-window summary
                 m1_end = cum_m1[-1] if cum_m1 else None
@@ -1987,8 +2045,7 @@ if is_internal and tab_smhi is not None:
                 font=dict(color=MUTED, family="Inter"))
             fig_eta.update_xaxes(showgrid=False, color=MUTED)
             st.plotly_chart(fig_eta, use_container_width=True,
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+                config=PLOT_CONFIG)
             # System η scatter overlay
             if not sys_clear.empty:
                 sys_sorted  = sys_clear.sort_values("created_at")
@@ -2111,8 +2168,7 @@ if is_internal and tab_smhi is not None:
                 )
                 fig_combo.update_xaxes(showgrid=False, color=MUTED)
                 st.plotly_chart(fig_combo, use_container_width=True,
-                    config={"scrollZoom":True,"displayModeBar":True,
-                            "modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+                    config=PLOT_CONFIG)
                 st.caption("η×10 plotted on power axis so 0.65 → 6.5 on right scale. "
                            "Gap between DNI-based theoretical and actual power = system losses.")
 
@@ -2145,7 +2201,7 @@ if is_internal and tab_smhi is not None:
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color=MUTED, family="Inter"))
             fig_kt.update_xaxes(showgrid=False, color=MUTED)
-            st.plotly_chart(fig_kt, use_container_width=True, config={"scrollZoom":True,"displayModeBar":True,"modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d"]})
+            st.plotly_chart(fig_kt, use_container_width=True, config=PLOT_CONFIG)
             st.caption("kt > 0.7 = clear sky, direct sunlight optimal for concentrating systems. "
                        "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
 
