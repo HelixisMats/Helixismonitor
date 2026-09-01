@@ -127,6 +127,13 @@ LANG = {
         "resolution_note":"Showing {res} averages across the selected period.",
         "resolution_raw":"Showing every reading, unaveraged.",
         "export_note_raw":"Export contains every reading, unaveraged.",
+        "err_timeout":"The database gave up on this query (statement timeout). "
+                      "The table is too large to read raw. Run supabase_perf.sql "
+                      "in the Supabase SQL editor — it moves this work into the "
+                      "database — or pick a shorter period.",
+        "err_rpc_timeout":"The database timed out aggregating this period. Try a "
+                          "shorter range, or re-run supabase_perf.sql (it raises "
+                          "the timeout for these queries).",
         "res_label":"Detail","res_auto":"Auto","res_fine":"Fine","res_full":"Full",
         "res_help":"Auto averages readings into buckets so long periods load in one "
                    "request. Fine keeps more detail. Full fetches every reading — "
@@ -186,6 +193,13 @@ LANG = {
         "resolution_note":"Visar {res}-medelvärden över vald period.",
         "resolution_raw":"Visar varje mätvärde, utan medelvärdesbildning.",
         "export_note_raw":"Exporten innehåller varje mätvärde, utan medelvärdesbildning.",
+        "err_timeout":"Databasen avbröt frågan (statement timeout). Tabellen är "
+                      "för stor för att läsas rå. Kör supabase_perf.sql i "
+                      "Supabase SQL-editorn — den flyttar jobbet in i databasen "
+                      "— eller välj en kortare period.",
+        "err_rpc_timeout":"Databasen hann inte aggregera perioden. Välj en kortare "
+                          "period, eller kör supabase_perf.sql igen (den höjer "
+                          "tidsgränsen för de här frågorna).",
         "res_label":"Detaljnivå","res_auto":"Auto","res_fine":"Fin","res_full":"Full",
         "res_help":"Auto slår ihop mätvärden i tidsintervall så att långa perioder "
                    "hämtas i en enda förfrågan. Fin behåller mer detalj. Full hämtar "
@@ -274,20 +288,43 @@ def get_db():
 db = get_db()
 
 # ── Query helpers ─────────────────────────────────────────────
-# PostgREST caps every response at 1000 rows, so any raw pull has to be
-# paginated. Two rules keep that from getting slow:
+# PostgREST caps every response at 1000 rows, so a raw pull has to be
+# paginated — and Supabase caps each statement at a few seconds, so every
+# page must also be cheap for Postgres to plan. Three rules:
 #
-#  1. KEYSET pagination, not OFFSET. `.range(offset, offset+999)` becomes
-#     LIMIT/OFFSET, and Postgres has to walk and throw away every skipped
-#     row — page 700 costs ~700x page 1. Paging on `id > last_id` costs the
-#     same on every page. (Paging on created_at would be wrong: all sensors
-#     in one MQTT message share a timestamp, so a page boundary inside a
-#     timestamp either skips rows or loops forever. `id` is unique.)
+#  1. Page on created_at, never on OFFSET and never on id alone.
+#     OFFSET makes Postgres walk and discard every skipped row. Paging on
+#     `id > last_id` looks cheaper but is worse here: with a created_at
+#     filter the planner walks the primary key from the start of the table
+#     and throws away everything older than the window — which on a table
+#     this size hits the statement timeout. created_at is the indexed
+#     column the window is expressed in, so seeking on it is what the
+#     index is for.
 #
-#  2. Aggregate in Postgres when the helper functions from
-#     supabase_perf.sql are installed — see _rpc() below. Without them the
-#     app still works, just by downloading raw rows.
+#  2. created_at is NOT unique — all sensors in one MQTT message share a
+#     timestamp — so the cursor is inclusive (gte) and rows already seen
+#     are dropped by id. Overlap costs one message per page.
+#
+#  3. Aggregate in Postgres when the helper functions from
+#     supabase_perf.sql are installed — see _rpc(). Without them the app
+#     still works, but on a large table the raw path may simply be too
+#     slow for Supabase's statement timeout, which is what _db_error()
+#     explains rather than dumping a Postgres error code at the user.
 PAGE = 1000
+ROW_BUDGET = 400_000      # stop runaway raw pulls before the browser dies
+
+
+def _is_timeout(e) -> bool:
+    txt = str(e).lower()
+    return "57014" in txt or "statement timeout" in txt or "canceling statement" in txt
+
+
+def _db_error(e):
+    """Show a DB failure in terms the operator can act on."""
+    if _is_timeout(e):
+        st.error(T["err_timeout"])
+    else:
+        st.error(f"DB: {e}")
 
 
 @st.cache_resource
@@ -298,46 +335,61 @@ def _rpc_flags():
 
 
 def _rpc(fn: str, params: dict):
-    """Call a Postgres function. Returns (True, data) when it ran, or
-    (False, None) when it is not installed — callers then fall back to the
-    raw-row path. Never raises: a broken fast path must not break the app."""
+    """Call a Postgres function from supabase_perf.sql.
+
+    Returns (status, data) where status is:
+      "ok"      — it ran; data is the result
+      "missing" — not installed; the caller should fall back to raw rows
+      "timeout" — installed but too slow; falling back would only stall
+                  again, so the caller should surface it instead
+      "error"   — anything else; treated like "missing"
+    Never raises: a broken fast path must not take the app down.
+    """
     flags = _rpc_flags()
     if flags.get(fn) is False:
-        return False, None
+        return "missing", None
     try:
         res = db.rpc(fn, params).execute()
         flags[fn] = True
-        return True, res.data
+        return "ok", res.data
     except Exception as e:
         msg = str(e).lower()
         if any(k in msg for k in
                ("does not exist", "could not find", "pgrst202", "permission")):
-            flags[fn] = False        # not installed — stop probing
-        return False, None
+            flags[fn] = False          # not installed — stop probing
+            return "missing", None
+        if _is_timeout(e):
+            return "timeout", None
+        return "error", None
 
 
 def _fetch_rows(t_from_iso, t_to_iso=None, sensors=None, page=PAGE):
-    """Raw sensor_readings over a time window, keyset-paginated by id."""
-    rows, last_id = [], 0
+    """Raw sensor_readings over a time window, paginated on created_at."""
+    rows, seen, cursor = [], set(), t_from_iso
     try:
         while True:
             q = (db.table("sensor_readings")
                    .select("id,created_at,sensor,value")
-                   .gte("created_at", t_from_iso))
+                   .gte("created_at", cursor))
             if t_to_iso:
                 q = q.lte("created_at", t_to_iso)
             if sensors:
                 q = q.in_("sensor", list(sensors))
-            res = q.gt("id", last_id).order("id", desc=False).limit(page).execute()
+            res = q.order("created_at", desc=False).limit(page).execute()
             batch = res.data
             if not batch:
                 break
-            rows.extend(batch)
-            last_id = batch[-1]["id"]
-            if len(batch) < page:
+            fresh = [r for r in batch if r["id"] not in seen]
+            if not fresh:
+                break                  # only rows we already have — done
+            for r in fresh:
+                seen.add(r["id"])
+            rows.extend(fresh)
+            if len(batch) < page or len(rows) >= ROW_BUDGET:
                 break
+            cursor = batch[-1]["created_at"]
     except Exception as e:
-        st.error(f"DB: {e}")
+        _db_error(e)
         return []
     return rows
 
@@ -441,13 +493,13 @@ def fetch_history_range(date_from, date_to,
     if max_points <= 0:
         return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
     bucket = bucket_seconds_for(date_from, date_to, max_points)
-    ok, data = _rpc("history_bucketed_json", {
+    status, data = _rpc("history_bucketed_json", {
         "t_from":         date_from.isoformat(),
         "t_to":           date_to.isoformat(),
         "bucket_seconds": bucket,
         "sensors":        None,
     })
-    if ok:
+    if status == "ok":
         if isinstance(data, str):
             data = json.loads(data)
         if not data:
@@ -457,6 +509,9 @@ def fetch_history_range(date_from, date_to,
         df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
         df["value"] = df["value"].astype(float)
         return df.sort_values("created_at")
+    if status == "timeout":
+        st.error(T["err_rpc_timeout"])
+        return pd.DataFrame()
     return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
 
 
@@ -469,9 +524,9 @@ def fetch_window_stats(date_from, date_to) -> pd.DataFrame:
     Empty DataFrame when the helper function is not installed — the caller
     then falls back to aggregating whatever it has.
     """
-    ok, data = _rpc("sensor_window_stats", {
+    status, data = _rpc("sensor_window_stats", {
         "t_from": date_from.isoformat(), "t_to": date_to.isoformat()})
-    if not ok or not data:
+    if status != "ok" or not data:
         return pd.DataFrame()
     return pd.DataFrame(data)
 
@@ -485,8 +540,11 @@ def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
     1000 at a time, just to draw 90 bars. daily_energy_summary() does the
     same integration in Postgres and returns 90 rows.
     """
-    ok, data = _rpc("daily_energy_summary", {"days_back": days})
-    if ok:
+    status, data = _rpc("daily_energy_summary", {"days_back": days})
+    if status == "timeout":
+        st.error(T["err_rpc_timeout"])
+        return pd.DataFrame()
+    if status == "ok":
         if not data:
             return pd.DataFrame()
         df = pd.DataFrame(data)
