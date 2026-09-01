@@ -9,6 +9,10 @@ created_at when available, falling back to the bridge receive time. This is what
 keeps data correct after an outage: when a device buffers readings during a
 disconnect and floods them on reconnect, each row keeps its true measurement time
 instead of all collapsing onto the reconnect moment.
+
+Sampling: at most one row per sensor per MIN_SAMPLE_INTERVAL_S seconds
+(default 1.0, set to 0 to store everything). Throttling is done on the
+measurement timestamp, so buffered back-fill after an outage is unaffected.
 """
 
 import os
@@ -40,6 +44,41 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
+
+# Minimum spacing between stored samples, per sensor, in seconds. The device
+# publishes faster than anyone reads the charts, and every extra row is paid
+# for forever — in table size, query time and Supabase disk. 0 disables it.
+MIN_SAMPLE_INTERVAL_S = float(os.getenv("MIN_SAMPLE_INTERVAL_S", "1.0"))
+
+# sensor -> epoch seconds of the last sample we kept
+_last_kept: dict[str, float] = {}
+_drop_stats = {"kept": 0, "dropped": 0}
+
+
+def keep_sample(sensor: str, ts_iso: str) -> bool:
+    """Rate-limit one sensor to one sample per MIN_SAMPLE_INTERVAL_S.
+
+    Throttles on the MEASUREMENT timestamp, not arrival time. That matters
+    after an outage: a device that buffered readings floods them on
+    reconnect, but each carries its own true time, so they are spaced
+    correctly and must be kept. Anything older than the last kept sample is
+    always kept for the same reason — back-fill must never be dropped.
+    """
+    if MIN_SAMPLE_INTERVAL_S <= 0:
+        return True
+    try:
+        t = datetime.fromisoformat(ts_iso).timestamp()
+    except (ValueError, TypeError):
+        return True                       # unparseable — do not silently drop
+    prev = _last_kept.get(sensor)
+    if prev is not None and 0 <= t - prev < MIN_SAMPLE_INTERVAL_S:
+        _drop_stats["dropped"] += 1
+        return False
+    if prev is None or t > prev:
+        _last_kept[sensor] = t
+    _drop_stats["kept"] += 1
+    return True
+
 
 # Fields in the payload that are metadata, not sensor values (never stored as sensors)
 SKIP_FIELDS = {"timestamp", "time", "date", "datetime", "ts", "epoch",
@@ -162,29 +201,42 @@ def on_message(client, userdata, msg):
                 if not sensor_clean or sensor_clean.lower() in SKIP_FIELDS:
                     continue
                 try:
-                    rows.append({
-                        "sensor":     sensor_clean,
-                        "value":      float(value),
-                        "topic":      msg.topic,
-                        "created_at": ts,
-                    })
+                    val = float(value)
                 except (ValueError, TypeError):
                     log.debug(f"Skipping non-numeric: {sensor_clean}={value!r}")
+                    continue
+                if not keep_sample(sensor_clean, ts):
+                    continue
+                rows.append({
+                    "sensor":     sensor_clean,
+                    "value":      val,
+                    "topic":      msg.topic,
+                    "created_at": ts,
+                })
     except json.JSONDecodeError:
         # Non-JSON payload — no device timestamp available, use receive time
         try:
-            rows.append({
-                "sensor":     msg.topic.split("/")[-1],
-                "value":      float(payload),
-                "topic":      msg.topic,
-                "created_at": recv_now,
-            })
+            _sensor = msg.topic.split("/")[-1]
+            _val    = float(payload)
+            if keep_sample(_sensor, recv_now):
+                rows.append({
+                    "sensor":     _sensor,
+                    "value":      _val,
+                    "topic":      msg.topic,
+                    "created_at": recv_now,
+                })
         except ValueError:
             log.warning(f"Could not parse payload: {payload!r}")
             return
 
     if not rows:
         return
+
+    total = _drop_stats["kept"] + _drop_stats["dropped"]
+    if total and total % 5000 < len(rows):
+        pct = 100.0 * _drop_stats["dropped"] / total
+        log.info(f"Throttle ({MIN_SAMPLE_INTERVAL_S}s): kept {_drop_stats['kept']}, "
+                 f"dropped {_drop_stats['dropped']} ({pct:.0f}%)")
 
     status = insert_rows(rows)
     if status and status < 300:

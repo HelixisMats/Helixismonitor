@@ -134,10 +134,11 @@ LANG = {
         "err_rpc_timeout":"The database timed out aggregating this period. Try a "
                           "shorter range, or re-run supabase_perf.sql (it raises "
                           "the timeout for these queries).",
-        "res_label":"Detail","res_auto":"Auto","res_fine":"Fine","res_full":"Full",
-        "res_help":"Auto averages readings into buckets so long periods load in one "
-                   "request. Fine keeps more detail. Full fetches every reading — "
-                   "accurate but slow over long periods.",
+        "res_label":"Detail","res_auto":"Auto","res_fine":"Fine","res_full":"Max (1 s)",
+        "res_help":"Readings are averaged into time buckets so a period loads in "
+                   "one request. Auto sizes the bucket to the period; Fine and "
+                   "Max keep more detail, down to a 1-second floor. The bucket "
+                   "actually used is shown under the first chart.",
         "export_note":"Export uses the same {res} averages shown in the charts.",
         "chart_hint":"Drag across a chart to zoom in. Use the preset buttons, double-click the chart, or the toolbar's reset button (top right) to zoom back out.",
         "date_from":"From","date_to":"To","peak_irr_lbl":"Peak irradiance","energy_kwh_lbl":"Energy (kWh)",
@@ -200,10 +201,11 @@ LANG = {
         "err_rpc_timeout":"Databasen hann inte aggregera perioden. Välj en kortare "
                           "period, eller kör supabase_perf.sql igen (den höjer "
                           "tidsgränsen för de här frågorna).",
-        "res_label":"Detaljnivå","res_auto":"Auto","res_fine":"Fin","res_full":"Full",
-        "res_help":"Auto slår ihop mätvärden i tidsintervall så att långa perioder "
-                   "hämtas i en enda förfrågan. Fin behåller mer detalj. Full hämtar "
-                   "varje mätvärde — exakt men långsamt över långa perioder.",
+        "res_label":"Detaljnivå","res_auto":"Auto","res_fine":"Fin","res_full":"Max (1 s)",
+        "res_help":"Mätvärden slås ihop i tidsintervall så att perioden hämtas i "
+                   "en enda förfrågan. Auto anpassar intervallet till perioden; Fin "
+                   "och Max behåller mer detalj, ned till 1 sekund. Vilket "
+                   "intervall som används visas under första grafen.",
         "export_note":"Exporten använder samma {res}-medelvärden som graferna.",
         "chart_hint":"Dra i grafen för att zooma in. Zooma ut igen med snabbknapparna, dubbelklick i grafen, eller reset-knappen i verktygsfältet uppe till höger.",
         "date_from":"Från","date_to":"Till","peak_irr_lbl":"Toppinstrålning","energy_kwh_lbl":"Energi (kWh)",
@@ -407,10 +409,16 @@ def _rows_to_df(rows) -> pd.DataFrame:
 # wait for.
 HIST_MAX_POINTS = 900
 
+# Finest bucket worth asking for. The bridge stores at most one sample per
+# sensor per second, so 1 s is the real floor of the data — asking for less
+# would just return the same points with more rows. Bucketing still applies
+# at every level, so the raw-row path is never used from the UI.
+MIN_BUCKET_SECONDS = 1
+
 
 def bucket_seconds_for(t_from, t_to, max_points: int = HIST_MAX_POINTS) -> int:
     span = max(1.0, (t_to - t_from).total_seconds())
-    return max(20, int(span // max_points))
+    return max(MIN_BUCKET_SECONDS, int(span // max_points))
 
 
 def fmt_resolution(seconds: int) -> str:
@@ -1373,7 +1381,7 @@ with tab_hist:
     # away short spikes, so "Full" stays available for digging into an event.
     # Keys stay language-independent so switching language does not invalidate
     # the stored session_state selection.
-    RES_CHOICES = {"auto": HIST_MAX_POINTS, "fine": 2500, "full": 0}
+    RES_CHOICES = {"auto": HIST_MAX_POINTS, "fine": 2500, "full": 5000}
     res_key = st.radio(T["res_label"], list(RES_CHOICES),
                        format_func=lambda k: T[f"res_{k}"], horizontal=True,
                        key="hist_res", help=T["res_help"])
