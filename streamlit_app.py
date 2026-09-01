@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-import os, requests
+import os, requests, json
 
 def send_alert_email(age_min: float):
     """Send email alert when data stops arriving. Uses Gmail SMTP."""
@@ -124,6 +124,14 @@ LANG = {
         "overview_title":"Overview — click to select a period",
         "overview_caption":"Yellow line = peak irradiance (W/m²). Blue bars = daily energy (kWh). Select a period with the date pickers below.",
         "btn_all":"All",
+        "resolution_note":"Showing {res} averages across the selected period.",
+        "resolution_raw":"Showing every reading, unaveraged.",
+        "export_note_raw":"Export contains every reading, unaveraged.",
+        "res_label":"Detail","res_auto":"Auto","res_fine":"Fine","res_full":"Full",
+        "res_help":"Auto averages readings into buckets so long periods load in one "
+                   "request. Fine keeps more detail. Full fetches every reading — "
+                   "accurate but slow over long periods.",
+        "export_note":"Export uses the same {res} averages shown in the charts.",
         "chart_hint":"Drag across a chart to zoom in. Use the preset buttons, double-click the chart, or the toolbar's reset button (top right) to zoom back out.",
         "date_from":"From","date_to":"To","peak_irr_lbl":"Peak irradiance","energy_kwh_lbl":"Energy (kWh)",
         "no_data_db":"No data in the database.","no_data_available":"No data available.",
@@ -175,6 +183,14 @@ LANG = {
         "overview_title":"Översikt — klicka för att välja period",
         "overview_caption":"Gula linjen = toppinstrålning (W/m²). Blå staplar = daglig energi (kWh). Välj period med datumväljarna nedan.",
         "btn_all":"Allt",
+        "resolution_note":"Visar {res}-medelvärden över vald period.",
+        "resolution_raw":"Visar varje mätvärde, utan medelvärdesbildning.",
+        "export_note_raw":"Exporten innehåller varje mätvärde, utan medelvärdesbildning.",
+        "res_label":"Detaljnivå","res_auto":"Auto","res_fine":"Fin","res_full":"Full",
+        "res_help":"Auto slår ihop mätvärden i tidsintervall så att långa perioder "
+                   "hämtas i en enda förfrågan. Fin behåller mer detalj. Full hämtar "
+                   "varje mätvärde — exakt men långsamt över långa perioder.",
+        "export_note":"Exporten använder samma {res}-medelvärden som graferna.",
         "chart_hint":"Dra i grafen för att zooma in. Zooma ut igen med snabbknapparna, dubbelklick i grafen, eller reset-knappen i verktygsfältet uppe till höger.",
         "date_from":"Från","date_to":"Till","peak_irr_lbl":"Toppinstrålning","energy_kwh_lbl":"Energi (kWh)",
         "no_data_db":"Ingen data i databasen.","no_data_available":"Ingen data tillgänglig.",
@@ -257,6 +273,102 @@ def get_db():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 db = get_db()
 
+# ── Query helpers ─────────────────────────────────────────────
+# PostgREST caps every response at 1000 rows, so any raw pull has to be
+# paginated. Two rules keep that from getting slow:
+#
+#  1. KEYSET pagination, not OFFSET. `.range(offset, offset+999)` becomes
+#     LIMIT/OFFSET, and Postgres has to walk and throw away every skipped
+#     row — page 700 costs ~700x page 1. Paging on `id > last_id` costs the
+#     same on every page. (Paging on created_at would be wrong: all sensors
+#     in one MQTT message share a timestamp, so a page boundary inside a
+#     timestamp either skips rows or loops forever. `id` is unique.)
+#
+#  2. Aggregate in Postgres when the helper functions from
+#     supabase_perf.sql are installed — see _rpc() below. Without them the
+#     app still works, just by downloading raw rows.
+PAGE = 1000
+
+
+@st.cache_resource
+def _rpc_flags():
+    """Remembers which helper functions exist, so a missing one is probed
+    once per server process instead of on every rerun."""
+    return {}
+
+
+def _rpc(fn: str, params: dict):
+    """Call a Postgres function. Returns (True, data) when it ran, or
+    (False, None) when it is not installed — callers then fall back to the
+    raw-row path. Never raises: a broken fast path must not break the app."""
+    flags = _rpc_flags()
+    if flags.get(fn) is False:
+        return False, None
+    try:
+        res = db.rpc(fn, params).execute()
+        flags[fn] = True
+        return True, res.data
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in
+               ("does not exist", "could not find", "pgrst202", "permission")):
+            flags[fn] = False        # not installed — stop probing
+        return False, None
+
+
+def _fetch_rows(t_from_iso, t_to_iso=None, sensors=None, page=PAGE):
+    """Raw sensor_readings over a time window, keyset-paginated by id."""
+    rows, last_id = [], 0
+    try:
+        while True:
+            q = (db.table("sensor_readings")
+                   .select("id,created_at,sensor,value")
+                   .gte("created_at", t_from_iso))
+            if t_to_iso:
+                q = q.lte("created_at", t_to_iso)
+            if sensors:
+                q = q.in_("sensor", list(sensors))
+            res = q.gt("id", last_id).order("id", desc=False).limit(page).execute()
+            batch = res.data
+            if not batch:
+                break
+            rows.extend(batch)
+            last_id = batch[-1]["id"]
+            if len(batch) < page:
+                break
+    except Exception as e:
+        st.error(f"DB: {e}")
+        return []
+    return rows
+
+
+def _rows_to_df(rows) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).drop(columns=["id"], errors="ignore")
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    return df.sort_values("created_at")
+
+
+# Points kept per sensor when bucketing. The charts are ~1000 px wide, so
+# more than this is detail nobody can see — and megabytes nobody wants to
+# wait for.
+HIST_MAX_POINTS = 900
+
+
+def bucket_seconds_for(t_from, t_to, max_points: int = HIST_MAX_POINTS) -> int:
+    span = max(1.0, (t_to - t_from).total_seconds())
+    return max(20, int(span // max_points))
+
+
+def fmt_resolution(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{round(seconds / 60)} min"
+    return f"{seconds / 3600:.1f} h"
+
+
 # ── Sensor data ───────────────────────────────────────────────
 @st.cache_data(ttl=25)
 def fetch_live() -> pd.DataFrame:
@@ -306,83 +418,101 @@ def check_data_alert(age_min: float, last_ts):
     elif age_min < 15:                      # data flowing again → re-arm
         state.pop("outage_alerted", None)
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_history(hours_back: int) -> pd.DataFrame:
+    """Raw readings for the last N hours (Live tab). Still raw — the live
+    charts want full resolution — but keyset-paginated, so a 7-day pull no
+    longer pays the OFFSET penalty on every page."""
     since = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings").select("created_at,sensor,value") \
-                .gte("created_at", since).order("created_at", desc=False) \
-                .range(offset, offset+psize-1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception as e:
-        st.error(f"DB: {e}"); return pd.DataFrame()
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-    return df.sort_values("created_at")
+    return _rows_to_df(_fetch_rows(since))
 
-@st.cache_data(ttl=1800)
-def fetch_history_range(date_from, date_to) -> pd.DataFrame:
-    """Fetch a specific date range. Cached 30 min — fast for historical analysis."""
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings").select("created_at,sensor,value")                 .gte("created_at", date_from.isoformat())                 .lte("created_at", date_to.isoformat())                 .order("created_at", desc=False)                 .range(offset, offset+psize-1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception as e:
-        st.error(f"DB: {e}"); return pd.DataFrame()
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-    return df.sort_values("created_at")
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_history_range(date_from, date_to,
+                       max_points: int = HIST_MAX_POINTS) -> pd.DataFrame:
+    """Readings for a date range, aggregated into time buckets by Postgres.
 
-@st.cache_data(ttl=3600)
+    A month of data is ~250 000 raw rows = 250 sequential requests; bucketed
+    it is ~900 points per sensor in ONE request. Same curve on screen.
+
+    max_points=0 asks for untouched raw rows — slow, but the only way to see
+    short spikes (pump cycling, stagnation) in a long window.
+    Falls back to raw rows if history_bucketed_json() is not installed.
+    """
+    if max_points <= 0:
+        return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
+    bucket = bucket_seconds_for(date_from, date_to, max_points)
+    ok, data = _rpc("history_bucketed_json", {
+        "t_from":         date_from.isoformat(),
+        "t_to":           date_to.isoformat(),
+        "bucket_seconds": bucket,
+        "sensors":        None,
+    })
+    if ok:
+        if isinstance(data, str):
+            data = json.loads(data)
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data).rename(
+            columns={"b": "created_at", "s": "sensor", "v": "value"})
+        df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+        df["value"] = df["value"].astype(float)
+        return df.sort_values("created_at")
+    return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_window_stats(date_from, date_to) -> pd.DataFrame:
+    """Exact per-sensor min/max/mean over the window.
+
+    Bucket averages flatten real peaks, so the summary table asks Postgres
+    for the true extremes instead of deriving them from the plotted points.
+    Empty DataFrame when the helper function is not installed — the caller
+    then falls back to aggregating whatever it has.
+    """
+    ok, data = _rpc("sensor_window_stats", {
+        "t_from": date_from.isoformat(), "t_to": date_to.isoformat()})
+    if not ok or not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
+    """Daily kWh + peak irradiance for the overview strip.
+
+    This is what made the History tab slow to open: 90 days of raw power and
+    irradiance readings is roughly three quarters of a million rows, fetched
+    1000 at a time, just to draw 90 bars. daily_energy_summary() does the
+    same integration in Postgres and returns 90 rows.
     """
-    Fetch daily aggregates for overview chart — one row per day per sensor.
-    Only pulls power + irradiance. Much lighter than raw data.
-    Cached 1 hour — used only for the coarse date-selection overview.
-    """
+    ok, data = _rpc("daily_energy_summary", {"days_back": days})
+    if ok:
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        df["date"] = pd.to_datetime(df["day"]).dt.date
+        df["kwh"] = df["kwh"].astype(float)
+        df["peak_irr"] = df["peak_irr"].astype(float)
+        return df[["date", "kwh", "peak_irr"]].sort_values("date")
+    return _daily_summary_raw(days)
+
+
+def _daily_summary_raw(days: int) -> pd.DataFrame:
+    """Fallback for when supabase_perf.sql has not been applied yet.
+    Same result, but it has to download every reading to get there."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings") \
-                .select("created_at,sensor,value") \
-                .in_("sensor", ["power", "irradiance"]) \
-                .gte("created_at", since) \
-                .order("created_at", desc=False) \
-                .range(offset, offset + psize - 1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception:
+    df = _rows_to_df(_fetch_rows(since, sensors=["power", "irradiance"]))
+    if df.empty:
         return pd.DataFrame()
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     df["date"] = df["created_at"].dt.tz_convert(ZoneInfo("Europe/Stockholm")).dt.date
-    # Daily energy (kWh) via trapezoid per day, daily peak irradiance
     out = []
     for date, grp in df.groupby("date"):
         pwr = grp[grp["sensor"] == "power"].sort_values("created_at")
         irr = grp[grp["sensor"] == "irradiance"]
         if len(pwr) >= 2:
             import numpy as np
-            times = pwr["created_at"].astype("int64").values / 1e9 / 3600
+            times = (pwr["created_at"] - pwr["created_at"].iloc[0]) \
+                        .dt.total_seconds().values / 3600.0
             fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
             kwh = float(max(0.0, fn(pwr["value"].values.astype(float), times)))
         else:
@@ -392,26 +522,14 @@ def fetch_daily_summary(days: int = 90) -> pd.DataFrame:
     return pd.DataFrame(out).sort_values("date")
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_today_power() -> pd.DataFrame:
-    """Fetch all power readings from midnight today — used for energy integration."""
+    """All power readings since local midnight — used for energy integration."""
     now_swe   = datetime.now(SWE)
-    today_utc = now_swe.replace(hour=0, minute=0, second=0, microsecond=0)                        .astimezone(timezone.utc)
-    rows, psize, offset = [], 1000, 0
-    try:
-        while True:
-            res = db.table("sensor_readings")                 .select("created_at,sensor,value")                 .eq("sensor", "power")                 .gte("created_at", today_utc.isoformat())                 .order("created_at", desc=False)                 .range(offset, offset + psize - 1).execute()
-            batch = res.data
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < psize: break
-            offset += psize
-    except Exception:
-        return pd.DataFrame()
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-    return df.sort_values("created_at")
+    today_utc = now_swe.replace(hour=0, minute=0, second=0, microsecond=0) \
+                       .astimezone(timezone.utc)
+    return _rows_to_df(_fetch_rows(today_utc.isoformat(), sensors=["power"]))
+
 
 @st.cache_data(ttl=1800)
 def fetch_strang(days_back: int = 1):
@@ -618,7 +736,11 @@ def integrate_power(df) -> float | None:
         return None
     # Use "value" column if present, else first numeric column
     val_col = "value" if "value" in sub.columns else sub.select_dtypes("number").columns[0]
-    times = sub["created_at"].astype("int64").values / 1e9 / 3600
+    # Hours since the first sample. Do NOT use .astype("int64")/1e9 here:
+    # that assumes nanosecond datetimes, and pandas 3 parses timestamps at
+    # microsecond resolution — which would silently divide every kWh by 1000.
+    times = (sub["created_at"] - sub["created_at"].iloc[0]) \
+                .dt.total_seconds().values / 3600.0
     power = sub[val_col].values.astype(float)
     try:
         import numpy as np
@@ -1188,8 +1310,20 @@ with tab_hist:
     dt_to   = datetime.combine(date_to,   datetime.max.time()).replace(tzinfo=SWE).astimezone(timezone.utc)
     hours_back = max(1, int((dt_to - dt_from).total_seconds() / 3600) + 1)
 
+    # How much detail to pull. Averaging into buckets is what makes a long
+    # window load in one request instead of hundreds — but it also smooths
+    # away short spikes, so "Full" stays available for digging into an event.
+    # Keys stay language-independent so switching language does not invalidate
+    # the stored session_state selection.
+    RES_CHOICES = {"auto": HIST_MAX_POINTS, "fine": 2500, "full": 0}
+    res_key = st.radio(T["res_label"], list(RES_CHOICES),
+                       format_func=lambda k: T[f"res_{k}"], horizontal=True,
+                       key="hist_res", help=T["res_help"])
+    hist_points = RES_CHOICES[res_key]
+    hist_bucket = bucket_seconds_for(dt_from, dt_to, hist_points) if hist_points else 0
+
     with st.spinner(T["loading_hist"]):
-        df_hist   = fetch_history_range(dt_from, dt_to)
+        df_hist   = fetch_history_range(dt_from, dt_to, hist_points)
         df_smhi_h = fetch_smhi_history(hours_back)
 
     # Data lagras i UTC. Plotly ritar datum i UTC och struntar i tidszons-offset,
@@ -1261,7 +1395,9 @@ with tab_hist:
         fig_solar.update_xaxes(showgrid=False, color=MUTED)
         add_time_controls(fig_solar)
         st.plotly_chart(fig_solar, use_container_width=True, config=PLOT_CONFIG)
-        st.caption(T["chart_hint"])
+        st.caption(T["chart_hint"] + "  \n"
+                   + (T["resolution_note"].format(res=fmt_resolution(hist_bucket))
+                      if hist_bucket else T["resolution_raw"]))
 
         # ── 2. Temperaturer & Tryck ──────────────────────────
         st.markdown(f'<div class="section-title">{T["section_temps_pressure"]}</div>',
@@ -1348,11 +1484,19 @@ with tab_hist:
         st.markdown(f'<div class="section-title">{T["section_summary"]}</div>',
                     unsafe_allow_html=True)
         all_sensors = temp_sensors + ["power","flow","irradiance","wind","pressure","temp_difference"]
-        piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
-            .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
+        # The plotted series are bucket averages, which hide true peaks — so
+        # min/max/mean come from the raw rows via sensor_window_stats() when
+        # it is installed, and from the plotted points otherwise.
+        stats = fetch_window_stats(dt_from, dt_to)
+        if not stats.empty:
+            piv = stats[stats["sensor"].isin(all_sensors)][
+                ["sensor", "v_min", "v_max", "v_mean"]].round(2).reset_index(drop=True)
+        else:
+            piv = df_hist[df_hist["sensor"].isin(all_sensors)] \
+                .groupby("sensor")["value"].agg(["min","max","mean"]).round(2).reset_index()
         piv.columns = [T["col_sensor"],T["col_min"],T["col_max"],T["col_mean"]]
         sensor_order = all_sensors
-        piv["_ord"] = piv["Sensor"].apply(lambda s: sensor_order.index(s)
+        piv["_ord"] = piv[T["col_sensor"]].apply(lambda s: sensor_order.index(s)
                                            if s in sensor_order else 99)
         st.dataframe(piv.sort_values("_ord").drop(columns="_ord"),
                      use_container_width=True, hide_index=True)
@@ -1473,7 +1617,9 @@ Ratio M1/M2 reveals the actual cp of the fluid.
 
                 # M1 cumulative: trapezoid of power sensor
                 pwr_sub = base["power"].dropna()
-                times_h  = pwr_sub.index.astype("int64") / 1e9 / 3600
+                # Hours since t0 — resolution-independent (see integrate_power)
+                times_h  = (pwr_sub.index - pwr_sub.index[0]) \
+                               .total_seconds() / 3600.0
                 try:
                     import numpy as np
                     fn = getattr(np, "trapezoid", None) or getattr(np, "trapz")
@@ -1552,8 +1698,11 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                 values="value", aggfunc="last"
             ).reset_index().sort_values("created_at", ascending=False)
             st.dataframe(piv2.head(500), use_container_width=True)
+            st.caption(T["export_note"].format(res=fmt_resolution(hist_bucket))
+                       if hist_bucket else T["export_note_raw"])
+            _tag = fmt_resolution(hist_bucket).replace(" ", "") if hist_bucket else "raw"
             st.download_button(f"⬇️ {T['download_csv']}", df_hist.to_csv(index=False),
-                f"helixis_{date_from}_{date_to}.csv", "text/csv")
+                f"helixis_{date_from}_{date_to}_{_tag}.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
