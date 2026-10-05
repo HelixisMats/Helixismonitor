@@ -11,11 +11,3 @@ primary_region = "arn"
 
 [processes]
   worker = "python mqtt_bridge.py"
-
-[machine]
-  auto_stop = false
-  auto_start = false
-  
-[http_service]
-  auto_stop_machines = false
-  auto_start_machines = true

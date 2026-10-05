@@ -2,6 +2,8 @@
 mqtt_bridge.py — Helixis LC Monitor
 Subscribes to helix/3/1/data on eaasy.life:1883
 Decodes the plc_block register array and inserts into Supabase.
+Supply temp and heat power are stored as temp_forward / power (dashboard names),
+and temp_difference is computed.
 
 Message format:
   {"plc_block": {"ts": "2026-10-05T14:11:32Z", "r": [mode, h0,l0, h1,l1, ...]}}
@@ -55,6 +57,13 @@ FIELDS = [
     "reserve",              # V[17]
 ]
 
+# Names the dashboard (Streamlit + PWA) already uses for the same measurement.
+# Stored under the dashboard name so existing graphs keep working.
+ALIASES = {
+    "temp_supply": "temp_forward",
+    "heat_power":  "power",
+}
+
 MODE_NAMES = {
     0: "Stop", 1: "Tracking", 2: "Parking", 3: "Rain",
     4: "Manual", 5: "StandBy", 6: "Calibration", 7: "Wind protection"
@@ -81,7 +90,11 @@ def decode_registers(r):
         if raw >= 0x80000000:
             raw -= 0x100000000
         value = raw / 100.0
-        result[name] = value
+        result[ALIASES.get(name, name)] = value
+
+    # Delta T (forward - return), used by the dashboard
+    if "temp_forward" in result and "temp_return" in result:
+        result["temp_difference"] = round(result["temp_forward"] - result["temp_return"], 2)
 
     return result
 
