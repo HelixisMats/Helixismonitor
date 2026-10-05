@@ -113,6 +113,12 @@ function Consumer({ x, y, w, h }) {
   )
 }
 
+const MODE_NAMES = {
+  0: 'STOP', 1: 'TRACKING', 2: 'PARKING', 3: 'RAIN',
+  4: 'MANUAL', 5: 'STANDBY', 6: 'CALIBRATION', 7: 'WIND PROTECT',
+}
+const MODE_COLOR = { 1: '#00e5a0', 7: '#e85353', 3: '#4a9ee8' }
+
 const LABEL = { fontSize: 9, fontWeight: 700, fontFamily: "'Syne',sans-serif", letterSpacing: '0.12em', fill: '#5060a0' }
 const VAL   = { fontFamily: "'Syne',sans-serif", fontWeight: 800 }
 const MONO  = { fontFamily: "'Space Mono',monospace", fontWeight: 700 }
@@ -134,13 +140,16 @@ export default function App() {
     load(); const id = setInterval(load, 30000); return () => clearInterval(id)
   }, [])
 
+  const hasPlcEnergy = data.heat_energy_today != null
+
   useEffect(() => {
+    if (hasPlcEnergy) return   // PLC reports energy today directly
     const load = async () => {
       const rows = await fetchTodayPower()
       setEnergyToday(integratePower(rows))
     }
     load(); const id = setInterval(load, 120000); return () => clearInterval(id)
-  }, [])
+  }, [hasPlcEnergy])
 
   const v = {}
   for (const [k, d] of Object.entries(data)) v[k] = d?.value
@@ -148,6 +157,10 @@ export default function App() {
   const fwdCol = tempColor(v.temp_forward, 20, 120)
   const retCol = tempColor(v.temp_return,  10, 80)
   const flow   = v.flow ?? 0
+  const energy = v.heat_energy_today ?? energyToday
+  const mode   = v.concentrator_mode != null ? Math.round(v.concentrator_mode) : null
+  const modeName  = mode != null ? (MODE_NAMES[mode] ?? `MODE ${mode}`) : '—'
+  const modeColor = MODE_COLOR[mode] ?? '#e8eaf6'
 
   // SVG 370×640, cx=185
   // Left panel:  x=30  y=64  w=120 h=230  cx=90
@@ -215,16 +228,21 @@ export default function App() {
         <text x="280" y="58" textAnchor="middle" fontSize={9} fontFamily="'Syne',sans-serif" fill="#5060a0">W/m²</text>
 
         {/* COLLECTORS */}
-        <Panel x={30}  y={64} w={120} h={230} temp={v.temp_left_coll}  />
-        <Panel x={220} y={64} w={120} h={230} temp={v.temp_right_coll} />
+        <Panel x={30}  y={64} w={120} h={230} temp={v.temp_forward} />
+        <Panel x={220} y={64} w={120} h={230} temp={v.temp_forward} />
 
-        <text x="90"  y="79" textAnchor="middle" {...LABEL}>LEFT COLLECTOR</text>
-        <text x="90"  y="101" textAnchor="middle" fontSize={22} {...VAL} fill={tempColor(v.temp_left_coll,20,160)}>
-          {fmt(v.temp_left_coll)}°
+        <text x="90"  y="79" textAnchor="middle" {...LABEL}>MODE</text>
+        <text x="90"  y="99" textAnchor="middle" fontSize={15} {...VAL} fill={modeColor}>
+          {modeName}
         </text>
-        <text x="280" y="79"  textAnchor="middle" {...LABEL}>RIGHT COLLECTOR</text>
-        <text x="280" y="101" textAnchor="middle" fontSize={22} {...VAL} fill={tempColor(v.temp_right_coll,20,160)}>
-          {fmt(v.temp_right_coll)}°
+
+        <text x="280" y="79"  textAnchor="middle" {...LABEL}>ELEVATION SUN · CONC</text>
+        <text x="280" y="99" textAnchor="middle" fontSize={15} {...VAL} fill="#e8c84a">
+          {fmt(v.sun_elevation,1)}° · {fmt(v.conc_elevation,1)}°
+        </text>
+        <text x="280" y="117" textAnchor="middle" {...LABEL}>AZIMUTH SUN · CONC</text>
+        <text x="280" y="137" textAnchor="middle" fontSize={15} {...VAL} fill="#e8c84a">
+          {fmt(v.sun_azimuth,1)}° · {fmt(v.conc_azimuth,1)}°
         </text>
 
         {/* CENTRAL MOUNT */}
@@ -279,7 +297,7 @@ export default function App() {
 
         <text x="90"  y="516" textAnchor="middle" {...LABEL}>ENERGY TODAY</text>
         <text x="90"  y="540" textAnchor="middle" fontSize={22} {...MONO} fill="#00e5a0">
-          {energyToday!=null?energyToday.toFixed(3):'—'}
+          {energy!=null?Number(energy).toFixed(2):'—'}
         </text>
         <text x="90"  y="554" textAnchor="middle" fontSize={9} fontFamily="'Syne',sans-serif" fill="#5060a0">kWh</text>
 

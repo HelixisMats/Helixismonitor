@@ -22,12 +22,9 @@ export async function fetchLatestReadings() {
 }
 
 export async function fetchTodayPower() {
-  // Stockholm midnight in UTC (UTC+1 winter, UTC+2 summer)
-  const now = new Date()
-  const offsetMin = -now.getTimezoneOffset() || 60  // fallback UTC+1
-  const midnight = new Date(now)
+  // Local midnight (phone is on Swedish time); toISOString() converts to UTC
+  const midnight = new Date()
   midnight.setHours(0, 0, 0, 0)
-  midnight.setMinutes(midnight.getMinutes() - offsetMin)
 
   const all = []
   let offset = 0
