@@ -1797,7 +1797,7 @@ if is_internal and tab_smhi is not None:
     | **DNI** | Direct Normal Irradiance | Solar energy arriving in a straight line from the sun, measured perpendicular to the sun's rays | Pyrheliometer (tracks sun) |
     | **DHI** | Diffuse Horizontal Irradiance | Scattered light only (clouds, atmosphere) — GHI minus the direct component | Calculated |
 
-    **Why DNI matters for Helixis:** The LC12 concentrates sunlight using mirrors. Diffuse light
+    **Why DNI matters for Helixis:** The LC10 concentrates sunlight using mirrors. Diffuse light
     (scattered by clouds) arrives from all directions and cannot be focused. Only DNI contributes
     to useful output. On a heavily overcast day, GHI may be 200 W/m² but DNI is near zero — the
     system produces almost nothing despite "some" sunlight.
@@ -2217,7 +2217,7 @@ if is_internal and tab_smhi is not None:
                     st.info("System η: insufficient data")
 
             st.caption(f"η = flow × ΔT × cp ÷ (DNI_STRÅNG × {APERTURE} m²) · "
-                       f"Hourly integration · LC12 spec η_peak ≈ 0.72")
+                       f"Hourly integration · LC10 spec η_peak ≈ 0.72")
 
             # Time series chart of η per measurement point
             fig_eta = go.Figure()
@@ -2245,7 +2245,7 @@ if is_internal and tab_smhi is not None:
                 annotation_text=f"p90 = {eta_p90:.3f}",
                 annotation_position="right", annotation_font_size=11)
             fig_eta.add_hline(y=0.72, line_dash="dash", line_color=MUTED,
-                annotation_text="LC12 spec 0.72",
+                annotation_text="LC10 spec 0.72",
                 annotation_position="right", annotation_font_size=10)
 
             fig_eta.update_layout(
@@ -2427,7 +2427,7 @@ with tab_om:
         st.markdown(f"<div class='section-title'>{T['about_spec']}</div>",
                     unsafe_allow_html=True)
         st.markdown(f"""<div style='font-size:.85rem;color:{MUTED};line-height:2.1'>
-<b style='color:{TEXT}'>Helixis LC12 HW</b><br>
+<b style='color:{TEXT}'>Helixis LC10 HW</b><br>
 Linear Concentrator — CSP<br>
 Aperture: 12.35 m² · 380 kg<br>
 Peak output: 9.2 kW @ 1000 W/m²<br>
@@ -2454,7 +2454,7 @@ Max temp: 160°C · Max pressure: 6 bar
 
 # ── Sidebar (minimal) ─────────────────────────────────────────
 with st.sidebar:
-    st.markdown(f"<div style='color:{TEXT};font-weight:600;font-size:.9rem;margin-bottom:8px'>Helixis LC12</div>",
+    st.markdown(f"<div style='color:{TEXT};font-weight:600;font-size:.9rem;margin-bottom:8px'>Helixis LC10</div>",
                 unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:.72rem;color:{MUTED}'>Eket · Örkelljunga · 56.248°N</div>",
                 unsafe_allow_html=True)
