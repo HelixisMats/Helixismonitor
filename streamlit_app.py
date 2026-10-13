@@ -113,7 +113,7 @@ LANG = {
         "section_dt_flow":"ΔT & Flow","section_summary":"Summary for period",
         "section_energy":"Energy","energy_today_trap":"Energy today (trapezoid)",
         "heat_sensor_total":"Heat energy sensor (total)",
-        "pressure_lbl":"Pressure (bar)","flow_lbl":"Flow (m³/h)",
+        "pressure_lbl":"Pressure (bar)","flow_lbl":"Flow (l/min)",
         "power_lbl":"Thermal power (kW)","irr_lbl":"Irradiance (W/m²)","wind_lbl":"Wind (m/s)",
         "trap_help":"Calculated via trapezoid integration. ΔE=(P₁+P₂)/2×Δt — more accurate than sensor.",
         "heat_help":"Accumulated from energy sensor since last reset.",
@@ -180,7 +180,7 @@ LANG = {
         "section_dt_flow":"ΔT & Flöde","section_summary":"Sammanfattning för perioden",
         "section_energy":"Energi","energy_today_trap":"Energi idag (trapets)",
         "heat_sensor_total":"Värmeenergisensor (total)",
-        "pressure_lbl":"Tryck (bar)","flow_lbl":"Flöde (m³/h)",
+        "pressure_lbl":"Tryck (bar)","flow_lbl":"Flöde (l/min)",
         "power_lbl":"Termisk effekt (kW)","irr_lbl":"Instrålning (W/m²)","wind_lbl":"Vind (m/s)",
         "trap_help":"Beräknad med trapetsintegration. ΔE=(P₁+P₂)/2×Δt — mer exakt än sensorn.",
         "heat_help":"Ackumulerat värde från energisensorn sedan senaste nollställning.",
@@ -432,14 +432,16 @@ def fmt_resolution(seconds: int) -> str:
 # ── Sensor data ───────────────────────────────────────────────
 @st.cache_data(ttl=25)
 def fetch_live() -> pd.DataFrame:
+    """Every sensor, last 20 minutes.
+
+    Paged through _fetch_rows. A plain .execute() here hit PostgREST's
+    1000-row ceiling, and since the rows came back oldest-first the cap threw
+    away the NEWEST half of the window — roughly 20 sensors x 90 samples is
+    1900 rows, so the Live tab was showing values about ten minutes behind
+    reality while still calling itself LIVE."""
     since = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
     try:
-        res = db.table("sensor_readings").select("created_at,sensor,value") \
-            .gte("created_at", since).order("created_at", desc=False).execute()
-        if not res.data: return pd.DataFrame()
-        df = pd.DataFrame(res.data)
-        df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-        return df.sort_values("created_at")
+        return _rows_to_df(_fetch_rows(since))
     except Exception as e:
         st.error(f"DB: {e}"); return pd.DataFrame()
 
@@ -692,10 +694,11 @@ def fetch_smhi_and_store() -> tuple[dict, dict]:
             result[key] = df
             # Store in Supabase
             try:
+                # iterrows over a day of samples is slow for no reason
                 to_insert = [
-                    {"created_at": row["created_at"].isoformat(),
-                     "sensor": f"smhi_{key}", "value": row["value"]}
-                    for _, row in df.iterrows()
+                    {"created_at": ts.isoformat(), "sensor": f"smhi_{key}",
+                     "value": float(val)}
+                    for ts, val in zip(df["created_at"], df["value"])
                 ]
                 db.table("smhi_readings").upsert(
                     to_insert, on_conflict="created_at,sensor"
@@ -709,6 +712,41 @@ def fetch_smhi_and_store() -> tuple[dict, dict]:
             errors[key] = str(e)
             result[key] = None
     return result, errors
+
+SMHI_TEMP_URL = ("https://opendata-download-metobs.smhi.se/api/version/latest"
+                 "/parameter/1/station/62040/period/latest-hour/data.json")
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_outside_temp():
+    """Outside temperature for the Live tab, without blocking the render.
+
+    The Live tab used to call fetch_smhi_and_store() for this one number. That
+    function fetches four SMHI endpoints with a 15-second timeout each and
+    upserts a whole day of rows back into Supabase — up to a minute of frozen
+    page every ten minutes, to fill a single gauge. Here we read what SMHI data
+    we already stored, and only reach out to SMHI, for the temperature alone
+    and with a short timeout, when that stored value has gone stale."""
+    try:
+        res = (db.table("smhi_readings").select("created_at,value")
+               .eq("sensor", "smhi_temperature")
+               .order("created_at", desc=True).limit(1).execute())
+        if res.data:
+            ts = pd.to_datetime(res.data[0]["created_at"], utc=True)
+            if datetime.now(timezone.utc) - ts < timedelta(hours=3):
+                return float(res.data[0]["value"])
+    except Exception:
+        pass
+    try:
+        r = requests.get(SMHI_TEMP_URL, timeout=6)
+        if r.status_code == 200:
+            vals = r.json().get("value") or []
+            if vals:
+                return float(vals[-1]["value"])
+    except Exception:
+        pass
+    return None
+
 
 @st.cache_data(ttl=300)
 def fetch_smhi_history(hours_back: int) -> pd.DataFrame:
@@ -848,7 +886,7 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
     mode="temp"         — cool blue → green → warm red gradient across full range
     """
     if val is None: val = mn
-    decimals = 0 if unit in ("W/m²", "°C") else (3 if unit == "m³/h" else 2)
+    decimals = 0 if unit in ("W/m²", "°C") else (1 if unit == "l/min" else 2)
 
     if mode == "temp":
         # Smooth 5-stop gradient: cold blue → teal → green → amber → red
@@ -1022,7 +1060,10 @@ with tab_live:
             # ── Temperatures (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["temperatures"]}</div>',
                         unsafe_allow_html=True)
-            tc = st.columns(6)
+            # The collector gauges only appear when those sensors are actually
+            # reporting. The new PLC block does not send temp_right_coll /
+            # temp_left_coll, and a gauge with no value silently parks its needle
+            # at the scale minimum — 20 °C, which reads like a measurement.
             temp_specs = [
                 ("collector_r","temp_right_coll", 20,160,"g_cr"),
                 ("collector_l","temp_left_coll",  20,160,"g_cl"),
@@ -1030,26 +1071,23 @@ with tab_live:
                 ("return",     "temp_return",     10,100,"g_rt"),
                 ("tank",       "temp_tank",       10,100,"g_tk"),
             ]
+            temp_specs = [t for t in temp_specs if v.get(t[1]) is not None]
+            tc = st.columns(len(temp_specs) + 1)
             for col,(lbl_key,sensor,mn,mx,gkey) in zip(tc,temp_specs):
                 with col:
                     render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
                         mode="temp", key=gkey)
             # Outside temperature from SMHI (last stored value)
-            with tc[5]:
-                smhi_now, _ = fetch_smhi_and_store()
-                outside_temp = None
-                df_ot = smhi_now.get("temperature")
-                if isinstance(df_ot, pd.DataFrame) and not df_ot.empty:
-                    outside_temp = float(df_ot["value"].iloc[-1])
-                render_echarts_gauge("Outside (SMHI)", outside_temp, -25, 40, "°C",
-                    mode="temp", key="g_outside")
+            with tc[-1]:
+                render_echarts_gauge("Outside (SMHI)", fetch_outside_temp(), -25, 40,
+                    "°C", mode="temp", key="g_outside")
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             g1,g2,g3,g4 = st.columns(4)
             with g1:
-                render_echarts_gauge(T["flow"], v.get("flow"), 0, 1, "m³/h",
+                render_echarts_gauge(T["flow"], v.get("flow"), 0, 30, "l/min",
                     mode="performance", key="g_flow")
             with g2:
                 render_echarts_gauge(T["power"], v.get("power"), 0, 9.2, "kW",
@@ -1144,20 +1182,21 @@ with tab_live:
   </div></div>"""
 
             st.markdown(f'<div class="section-title">{T["temperatures"]}</div>', unsafe_allow_html=True)
-            cols = st.columns(5)
-            for col,(lbl,s,col_,mn,mx) in zip(cols,[
+            _temp_tiles = [t for t in [
                 ("Collector R","temp_right_coll",RUST,20,160),
                 ("Collector L","temp_left_coll",AMBER,20,160),
                 ("Forward","temp_forward",RUST,20,120),
                 ("Return","temp_return",SLATE,10,100),
-                ("Tank","temp_tank",TEAL,10,100)]):
+                ("Tank","temp_tank",TEAL,10,100)] if v.get(t[1]) is not None]
+            cols = st.columns(max(1, len(_temp_tiles)))
+            for col,(lbl,s,col_,mn,mx) in zip(cols,_temp_tiles):
                 col.markdown(tile(lbl,v.get(s),"°C",mn,mx,col_,1),unsafe_allow_html=True)
 
             st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
                         unsafe_allow_html=True)
             cols2 = st.columns(6)
             for col,(lbl,s,u,mn,mx,col_,dec,warn) in zip(cols2,[
-                (T["flow"],"flow","m³/h",0,1,SLATE,3,None),
+                (T["flow"],"flow","l/min",0,30,SLATE,1,None),
                 (T["power"],"power","kW",0,9.2,RUST,2,None),
                 (T["irradiance"],"irradiance","W/m²",0,1500,irr_color,0,None),
                 (T["pressure"],"pressure","bar",0,6,pcolor,2,5.0),
@@ -1302,7 +1341,7 @@ with tab_live:
                                 font=dict(size=10, color=MUTED, family="Inter")),
                     yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
                                tickfont=dict(color=TEXT), gridcolor=BORDER),
-                    yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                    yaxis2=dict(title=dict(text="l/min", font=dict(color=SLATE)),
                                 tickfont=dict(color=SLATE), overlaying="y", side="right",
                                 showgrid=False, anchor="x"),
                     yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
@@ -1511,7 +1550,7 @@ with tab_hist:
                 x=sub_dt["created_at"], y=sub_dt["value"],
                 name="ΔT (°C)", mode="lines",
                 line=dict(width=1.8, color=TEXT), yaxis="y"))
-        # Right axis (inner): Flow m³/h
+        # Right axis (inner): Flow l/min
         sub_fl = df_hist[df_hist["sensor"] == "flow"]
         if not sub_fl.empty:
             fig_dt.add_trace(go.Scatter(
@@ -1532,7 +1571,7 @@ with tab_hist:
                         font=dict(size=10, color=MUTED, family="Inter")),
             yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
                        tickfont=dict(color=TEXT), gridcolor=BORDER),
-            yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+            yaxis2=dict(title=dict(text="l/min", font=dict(color=SLATE)),
                         tickfont=dict(color=SLATE), overlaying="y", side="right",
                         showgrid=False, anchor="x"),
             yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
