@@ -525,6 +525,21 @@ def fetch_history_range(date_from, date_to,
     return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_recent_bucketed(hours_back: int, max_points: int = 900) -> pd.DataFrame:
+    """Last N hours, every sensor, bucketed by Postgres.
+
+    The Live tab used to call fetch_history(168), which pulls RAW rows. Since
+    the bridge went to 1-second resolution seven days is close to a million
+    rows, and _fetch_rows stops at ROW_BUDGET. It pages oldest-first, so that
+    cut-off threw away the NEWEST days without a word: the charts ended on
+    whichever day the budget ran out, and the app announced "no data in the
+    last 24 hours" while readings were arriving normally."""
+    t_to = datetime.now(timezone.utc)
+    t_from = t_to - timedelta(hours=hours_back)
+    return fetch_history_range(t_from, t_to, max_points)
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_window_stats(date_from, date_to) -> pd.DataFrame:
     """Exact per-sensor min/max/mean over the window.
@@ -1109,7 +1124,7 @@ with tab_live:
             ])
 
             # ── Hourly & Daily energy bar charts ──────────────
-            df_7d = fetch_history(168)  # 7 days for daily bars
+            df_7d = fetch_recent_bucketed(168)  # 7 days for daily bars
             if not df_7d.empty:
                 pwr_all = df_7d[df_7d["sensor"]=="power"][["created_at","value"]].copy()
                 pwr_all = pwr_all.sort_values("created_at")
@@ -1212,7 +1227,7 @@ with tab_live:
         # ── Sol & Effekt — senaste två dagarna med data ───────
         st.markdown(f'<div class="section-title">{T["recent_2days"]}</div>',
                     unsafe_allow_html=True)
-        df_48h = fetch_history(168)  # 7 dagar — hittar senaste dagarna oavsett gap
+        df_48h = fetch_recent_bucketed(168)  # 7 dagar — hittar senaste dagarna oavsett gap
         if df_48h.empty:
             st.caption(T["no_data_db"])
         else:
@@ -1284,8 +1299,9 @@ with tab_live:
         if df_48h.empty:
             st.caption(T["no_data_db"])
         else:
-            cutoff24 = datetime.now(timezone.utc) - timedelta(hours=24)
-            df_24 = df_48h[df_48h["created_at"] >= cutoff24].copy()
+            # Own pull rather than a slice of the 7-day set: bucketed over
+            # 24 hours the resolution is ~1.5 min instead of ~11.
+            df_24 = fetch_recent_bucketed(24)
             if df_24.empty:
                 st.caption(T["no_data_last_day"])
             else:
