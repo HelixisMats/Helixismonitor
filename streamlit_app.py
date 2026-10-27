@@ -5,7 +5,7 @@ Tabs: Live (gauges) | Historik | SMHI & Analys
 
 import streamlit as st
 from supabase import create_client
-from streamlit_echarts import st_echarts
+from streamlit_echarts import st_echarts, JsCode
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
@@ -375,13 +375,13 @@ st.markdown(f"""<style>
   div[data-testid="stToolbar"]{{display:none!important;}}
 
   /* Gauge heading: label, then the big reading above the dial */
-  .hx-g-lbl{{font-size:.72rem;font-weight:800;letter-spacing:.08em;
-    text-transform:uppercase;color:{MUTED};text-align:center;}}
-  .hx-g-val{{font-size:2.3rem;font-weight:500;color:{TEXT};text-align:center;
-    line-height:1.15;margin-top:2px;}}
-  .hx-g-val span{{font-size:.95rem;font-weight:500;color:{MUTED};margin-left:3px;}}
-  .hx-g-rng{{display:flex;justify-content:space-between;font-size:.66rem;
-    color:{MUTED};padding:0 14px;margin-top:-14px;}}
+  .hx-g-lbl{{font-size:.80rem;font-weight:700;letter-spacing:.055em;
+    text-transform:uppercase;color:{TEXT};text-align:center;}}
+  .hx-g-val{{font-size:2.45rem;font-weight:400;color:{TEXT};text-align:center;
+    line-height:1.15;margin-top:4px;}}
+  .hx-g-val span{{font-size:1.05rem;font-weight:400;color:{MUTED};margin-left:4px;}}
+  .hx-g-rng{{display:flex;justify-content:space-between;font-size:.74rem;
+    color:{MUTED};padding:0 10px;margin-top:-12px;}}
 
   /* Metric tiles */
   div[data-testid="metric-container"]{{background:{BG2};border:1px solid {BORDER};border-radius:12px;padding:14px 18px;}}
@@ -1078,7 +1078,17 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
                        "itemStyle": {"color": "#1A1D26"}},
             "axisTick":  {"show": False},
             "splitLine": {"show": False},
-            "axisLabel": {"show": False},
+            # The scale, printed just inside the arc. The two ends are blanked
+            # out here because they are already spelled out with their unit
+            # under the dial — showing them twice only adds clutter.
+            "splitNumber": 5,
+            "axisLabel": {"show": True, "distance": 11, "fontSize": 10,
+                          "color": "#9AA1B4",
+                          # Parentheses around the bounds: a negative minimum
+                          # such as -25 would otherwise build "v--25".
+                          "formatter": JsCode(
+                              "function(v){return (Math.abs(v-(%s))<1e-9||"
+                              "Math.abs(v-(%s))<1e-9)?'':v;}" % (mn, mx))},
             "detail": {"show": False},
             "title": {"show": False},
             "data": [{"value": round(float(val), decimals)}],
