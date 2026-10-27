@@ -589,6 +589,15 @@ def fmt_resolution(seconds: int) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+# Which series each Live chart actually draws. Everything else the database
+# holds is left where it is.
+LIVE_POWER_SENSORS = ["power", "heat_power"]
+LIVE_SUN_SENSORS   = ["irradiance", "power", "heat_power"]
+LIVE_DAY_SENSORS   = ["temp_forward", "temp_supply", "temp_return", "temp_tank",
+                      "temp_right_coll", "temp_left_coll",
+                      "flow", "pressure", "temp_difference"]
+
+
 # ── Sensor data ───────────────────────────────────────────────
 @st.cache_data(ttl=25)
 def fetch_live() -> pd.DataFrame:
@@ -650,7 +659,8 @@ def fetch_history(hours_back: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_history_range(date_from, date_to,
-                       max_points: int = HIST_MAX_POINTS) -> pd.DataFrame:
+                       max_points: int = HIST_MAX_POINTS,
+                       sensors=None) -> pd.DataFrame:
     """Readings for a date range, aggregated into time buckets by Postgres.
 
     A month of data is ~250 000 raw rows = 250 sequential requests; bucketed
@@ -661,13 +671,16 @@ def fetch_history_range(date_from, date_to,
     Falls back to raw rows if history_bucketed_json() is not installed.
     """
     if max_points <= 0:
-        return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
+        return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat(),
+                                       sensors=sensors))
     bucket = bucket_seconds_for(date_from, date_to, max_points)
     status, data = _rpc("history_bucketed_json", {
         "t_from":         date_from.isoformat(),
         "t_to":           date_to.isoformat(),
         "bucket_seconds": bucket,
-        "sensors":        None,
+        # Only the series the caller is going to draw. Asking for all 21 when
+        # a chart plots two is the single most expensive habit in this app.
+        "sensors":        list(sensors) if sensors else None,
     })
     if status == "ok":
         if isinstance(data, str):
@@ -682,11 +695,13 @@ def fetch_history_range(date_from, date_to,
     if status == "timeout":
         st.error(T["err_rpc_timeout"])
         return pd.DataFrame()
-    return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat()))
+    return _rows_to_df(_fetch_rows(date_from.isoformat(), date_to.isoformat(),
+                                   sensors=sensors))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_recent_bucketed(hours_back: int, max_points: int = 900) -> pd.DataFrame:
+def fetch_recent_bucketed(hours_back: int, max_points: int = 900,
+                          sensors=None) -> pd.DataFrame:
     """Last N hours, every sensor, bucketed by Postgres.
 
     The Live tab used to call fetch_history(168), which pulls RAW rows. Since
@@ -697,7 +712,7 @@ def fetch_recent_bucketed(hours_back: int, max_points: int = 900) -> pd.DataFram
     last 24 hours" while readings were arriving normally."""
     t_to = datetime.now(timezone.utc)
     t_from = t_to - timedelta(hours=hours_back)
-    return fetch_history_range(t_from, t_to, max_points)
+    return fetch_history_range(t_from, t_to, max_points, sensors)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -938,6 +953,39 @@ def fetch_smhi_history(hours_back: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ── Helpers ───────────────────────────────────────────────────
+# Thermal power from flow and temperature difference.
+#
+# The flow sensor reports LITRES PER MINUTE. Every formula in this file used
+# to divide by 3600, which is the conversion for cubic metres per hour — the
+# unit the old pipeline wrongly labelled this sensor with. That made every
+# computed power, and therefore every efficiency, 16.7 times too high, which
+# is why the efficiency filter threw away all of its own samples.
+#
+#   mass flow [kg/s] = flow [l/min] x rho [kg/m3] / 60000
+#   P [kW]           = mass flow x cp [J/kgK] x dT [K] / 1000
+RHO_HTF = 1000.0            # kg/m3
+CP_HTF  = 3800.0            # J/kgK, 30% glycol. Pure water is 4186.
+FLOW_MIN_LMIN = 1.0         # below this the loop is not circulating
+
+
+def thermal_power_kw(flow_lmin, dt_k, cp=CP_HTF, rho=RHO_HTF):
+    """kW carried by the heat transfer fluid. flow in l/min, dt in K."""
+    return flow_lmin * rho * cp * dt_k / 60000.0 / 1000.0
+
+
+def pick_sensor(df, *names):
+    """First of these sensor names that carries data.
+
+    The PLC was replaced and renamed its tags: temp_forward became
+    temp_supply, power became heat_power. Both generations sit in the same
+    table, so every analysis has to accept either."""
+    for n in names:
+        sub = df[df["sensor"] == n]
+        if not sub.empty:
+            return sub, n
+    return df.iloc[0:0], names[0]
+
+
 def naive_swe(s):
     """Return timestamps as tz-naive Swedish local wall-clock for Plotly.
 
@@ -1326,7 +1374,12 @@ if page == "live":
             ])
 
             # ── Hourly & Daily energy bar charts ──────────────
-            df_7d = fetch_recent_bucketed(168)  # 7 days for daily bars
+            # Daily bars need one series over seven days, not every sensor at
+            # full resolution: ~400 points is more than a bar chart can show.
+            df_7d = fetch_recent_bucketed(168, max_points=400,
+                                          sensors=LIVE_POWER_SENSORS)
+            if not df_7d.empty and "power" not in set(df_7d["sensor"]):
+                df_7d = df_7d.assign(sensor="power")   # new PLC name
             if not df_7d.empty:
                 pwr_all = df_7d[df_7d["sensor"]=="power"][["created_at","value"]].copy()
                 pwr_all = pwr_all.sort_values("created_at")
@@ -1426,7 +1479,13 @@ if page == "live":
 
         # ── Sol & Effekt — senaste två dagarna med data ───────
         hx_section(T["recent_2days"], "sun-power-icon.svg")
-        df_48h = fetch_recent_bucketed(168)  # 7 dagar — hittar senaste dagarna oavsett gap
+        # Two series, seven days back so a gap does not hide the last day
+        # that actually has data.
+        df_48h = fetch_recent_bucketed(168, max_points=500,
+                                       sensors=LIVE_SUN_SENSORS)
+        if not df_48h.empty and "power" not in set(df_48h["sensor"]):
+            df_48h = df_48h.assign(
+                sensor=df_48h["sensor"].replace({"heat_power": "power"}))
         if df_48h.empty:
             st.caption(T["no_data_db"])
         else:
@@ -1499,7 +1558,8 @@ if page == "live":
         else:
             # Own pull rather than a slice of the 7-day set: bucketed over
             # 24 hours the resolution is ~1.5 min instead of ~11.
-            df_24 = fetch_recent_bucketed(24)
+            df_24 = fetch_recent_bucketed(24, max_points=600,
+                                          sensors=LIVE_DAY_SENSORS)
             if df_24.empty:
                 st.caption(T["no_data_last_day"])
             else:
@@ -1837,7 +1897,7 @@ if page == "hist":
         with st.expander("🔬 Power correlation: 3 methods (temporary analysis)", expanded=True):
             st.markdown(f"""
 **M1 — Power sensor:** Direct `power` reading, kW.
-**M2 — Flow×ΔT (physics):** `P = flow/3600 × ρ × cp × (T_fwd − T_ret)`, kW.
+**M2 — Flow×ΔT (physics):** `P = flow[l/min] × ρ × cp × (T_fwd − T_ret) / 60000 / 1000`, kW.
 **M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
 
 **Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
@@ -1852,12 +1912,20 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                                min_value=3400, max_value=4200, value=CP_DEFAULT, step=50,
                                help="Pure water=4186 · 30% glycol≈3800 · 50% glycol≈3500")
 
-            sensors_needed = ["power", "flow", "temp_forward", "temp_return", "heat_energy"]
+            # Accept both PLC generations for every tag.
+            sensor_alts = {
+                "power":        ("power", "heat_power"),
+                "flow":         ("flow",),
+                "temp_forward": ("temp_forward", "temp_supply"),
+                "temp_return":  ("temp_return",),
+                "heat_energy":  ("heat_energy", "heat_energy_total"),
+            }
             dfs = {}
-            for s in sensors_needed:
-                sub = df_hist[df_hist["sensor"] == s][["created_at","value"]].copy()
-                sub = sub.rename(columns={"value": s}).set_index("created_at")
-                dfs[s] = sub
+            for key, alts in sensor_alts.items():
+                sub, _used = pick_sensor(df_hist, *alts)
+                sub = sub[["created_at", "value"]].copy()
+                sub = sub.rename(columns={"value": key}).set_index("created_at")
+                dfs[key] = sub
 
             if all(s in dfs and not dfs[s].empty for s in ["flow","temp_forward","temp_return"]):
                 base = dfs["flow"]
@@ -1871,10 +1939,10 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                 base = base.dropna(subset=["flow","temp_forward","temp_return"])
 
                 # M2 with selected cp
-                base["p_physics"] = (
-                    base["flow"] / 3600 * RHO * cp_val *
-                    (base["temp_forward"] - base["temp_return"])
-                ) / 1000
+                base["p_physics"] = thermal_power_kw(
+                    base["flow"],
+                    base["temp_forward"] - base["temp_return"],
+                    cp=cp_val, rho=RHO)
 
                 # M3: cumulative delta from t₀ in kWh
                 if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
@@ -1907,19 +1975,28 @@ Ratio M1/M2 reveals the actual cp of the fluid.
 
                 # ── Correlation metrics ────────────────────────────
                 if "power" in base.columns:
-                    both = base[["power","p_physics"]].dropna()
+                    # Only samples where the loop is actually running. Taking
+                    # the median across every night and every standstill put
+                    # thousands of zeros in the middle of the distribution, so
+                    # the ratio came out 0.000 and the implied cp came out inf.
+                    both = base[["power", "p_physics", "flow"]].dropna()
+                    both = both[(both["flow"] > FLOW_MIN_LMIN) &
+                                (both["p_physics"] > 0.2)]
                     if len(both) > 10:
                         corr  = both["power"].corr(both["p_physics"])
-                        ratio = (both["power"] / both["p_physics"].replace(0, float("nan"))).median()
-                        implied_cp = cp_val / ratio  # if ratio=1.087 → true cp = 3800/1.087
+                        ratio = (both["power"] / both["p_physics"]).median()
+                        implied_cp = cp_val / ratio if ratio and ratio > 0.05 else float("nan")
                         c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Correlation M1 vs M2", f"{corr:.3f}",
                             help=">0.99 = power is calculated from flow×ΔT in controller")
                         c2.metric("Median ratio M1/M2", f"{ratio:.3f}",
                             help="1.0 = perfect. Deviation = cp mismatch or calibration offset")
                         c3.metric("cp used", f"{cp_val} J/kg·K")
-                        c4.metric("Implied cp if ratio=1.0", f"{implied_cp:.0f} J/kg·K",
+                        c4.metric("Implied cp if ratio=1.0",
+                            "—" if implied_cp != implied_cp else f"{implied_cp:.0f} J/kg·K",
                             help="The cp value that would make M2 exactly match M1")
+                        st.caption(f"Statistics from {len(both)} samples with flow above "
+                                   f"{FLOW_MIN_LMIN:g} l/min — idle periods are excluded.")
                         if corr > 0.99:
                             st.info("🔗 Correlation >0.99 — power sensor is calculated from flow×ΔT "
                                     "internally. M1 and M2 are **not independent**.")
@@ -2304,7 +2381,8 @@ if is_internal:
             eta_df = eta_df.dropna(subset=["t_out","t_in","flow","dni_strang"])
             if not eta_df.empty:
                 eta_df["dT_coll"] = (eta_df["t_out"] - eta_df["t_in"]).abs()
-                eta_df["p_coll"]  = eta_df["flow"] / 3600 * RHO * CP * eta_df["dT_coll"] / 1000
+                eta_df["p_coll"]  = thermal_power_kw(eta_df["flow"], eta_df["dT_coll"],
+                                                    cp=CP, rho=RHO)
                 eta_df = eta_df.sort_values("created_at")
                 eta_df["dt_h"]   = eta_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
                 eta_df["e_coll"] = eta_df["p_coll"]     * eta_df["dt_h"]
@@ -2320,7 +2398,7 @@ if is_internal:
                 hourly_eta = hourly_eta[
                     (hourly_eta["dni_mean"]  > 300) &
                     (hourly_eta["p_mean"]    > 0.5) &
-                    (hourly_eta["flow_mean"] > 0.05) &
+                    (hourly_eta["flow_mean"] > FLOW_MIN_LMIN) &
                     (hourly_eta["n"]         > 10)
                 ].copy()
                 hourly_eta["eta_h"] = hourly_eta["e_coll"] / \
@@ -2335,7 +2413,7 @@ if is_internal:
                     eta_df["eta_raw"] = eta_df["eta_h"]
                     eta_df["ghi_s"]   = eta_df["dni_strang"]
                     eta_clear = eta_df[
-                        (eta_df["flow"] > 0.05) & (eta_df["p_coll"] > 0.3)
+                        (eta_df["flow"] > FLOW_MIN_LMIN) & (eta_df["p_coll"] > 0.3)
                     ].copy()
         # Compute η statistics from qualifying samples
         if not eta_clear.empty:
@@ -2367,7 +2445,8 @@ if is_internal:
             sys_df = sys_df.dropna(subset=["t_fwd","t_ret","flow","dni_strang"])
             if not sys_df.empty:
                 sys_df["dT_sys"] = (sys_df["t_fwd"] - sys_df["t_ret"]).abs()
-                sys_df["p_sys"]  = sys_df["flow"] / 3600 * RHO * CP * sys_df["dT_sys"] / 1000
+                sys_df["p_sys"]  = thermal_power_kw(sys_df["flow"], sys_df["dT_sys"],
+                                                   cp=CP, rho=RHO)
                 sys_df = sys_df.sort_values("created_at")
                 sys_df["dt_h"]  = sys_df["created_at"].diff().dt.total_seconds().fillna(0) / 3600
                 sys_df["e_sys"] = sys_df["p_sys"]      * sys_df["dt_h"]
@@ -2381,14 +2460,14 @@ if is_internal:
                 ).reset_index()
                 h_sys = h_sys[
                     (h_sys["dni_mean"]  > 300) & (h_sys["p_mean"]    > 0.5) &
-                    (h_sys["flow_mean"] > 0.05) & (h_sys["n"]        > 10)
+                    (h_sys["flow_mean"] > FLOW_MIN_LMIN) & (h_sys["n"]        > 10)
                 ].copy()
                 h_sys["eta_h"] = h_sys["e_sys"] / h_sys["e_in"].replace(0, float("nan"))
                 h_sys = h_sys[(h_sys["eta_h"] >= 0.05) & (h_sys["eta_h"] <= 0.90)]
                 if not h_sys.empty:
                     sys_df = sys_df.merge(h_sys[["strang_hour","eta_h"]], on="strang_hour", how="inner")
                     sys_df["eta_raw"] = sys_df["eta_h"]
-                    sys_clear = sys_df[(sys_df["flow"] > 0.05) & (sys_df["p_sys"] > 0.3)].copy()
+                    sys_clear = sys_df[(sys_df["flow"] > FLOW_MIN_LMIN) & (sys_df["p_sys"] > 0.3)].copy()
 
         if not sys_clear.empty:
             sys_median = float(sys_clear["eta_raw"].median())
