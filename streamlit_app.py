@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import os, requests, json
+import numpy as np
+from irradiance_panel import clear_sky, fit_line
 
 def send_alert_email(age_min: float):
     """Send email alert when data stops arriving. Uses Gmail SMTP."""
@@ -45,7 +47,7 @@ BG     = "#FFFFFF"; BG2 = "#F5F6FA"; BORDER = "#E6E9F2"
 TEXT   = "#10131A"; MUTED = "#8A90A8"; BLUE = "#2878F5"
 CARD_R = "18px"                      # card corner radius
 SHADOW = "0 2px 16px rgba(20,30,60,.07)"
-APP_BUILD = "2026-10-27"             # shown in the card, so it is obvious
+APP_BUILD = "2026-10-29"             # shown in the card, so it is obvious
                                      # which version is actually deployed
 HERO   = "hero.jpg"                  # background render from the design
 ASSETS = "assets"                    # icons and logo exported from Figma
@@ -1006,9 +1008,13 @@ def latest_val(df, sensor):
 def fmt(val, decimals=1, unit=""):
     return f"{val:.{decimals}f} {unit}".strip() if val is not None else "—"
 
-def mwh_to_kwh(val):
-    """Convert heat_energy sensor (MWh) to kWh for display."""
-    return val * 1000 if val is not None else None
+def heat_energy_kwh(val):
+    """The heat meter's cumulative counter, in kWh.
+
+    It was read as MWh and multiplied by 1000. The three-method panel settled
+    it: over one window M1 integrated 53.701 kWh while the counter moved
+    53.730 — a ratio of 1.0005, not 1000. The counter is already in kWh."""
+    return val
 
 def metric_tile(label, val, unit, mn, mx, color, decimals=1, warn=None):
     display = fmt(val, decimals, unit)
@@ -1369,7 +1375,9 @@ if page == "live":
             hx_section(T["energy"], "energy-icon.svg")
             render_tiles([
                 (T["energy_today"], energy_today,             "kWh", 0, 30,   TEAL, 3, None),
-                (T["heat_total"],   mwh_to_kwh(v.get("heat_energy")), "kWh", 0, 9999, BLUE, 3, None),
+                (T["heat_total"],   heat_energy_kwh(v.get("heat_energy_total")
+                                                     or v.get("heat_energy")),
+                 "kWh", 0, 9999, BLUE, 3, None),
                 (T["delta_t"],      v.get("temp_difference"), "°C",  0, 50,   BLUE, 2, None),
             ])
 
@@ -1475,7 +1483,9 @@ if page == "live":
             st.markdown(f'<div class="section-title">{T["section_energy"]}</div>', unsafe_allow_html=True)
             e1,e2 = st.columns(2)
             e1.metric(T["energy_today_trap"], fmt(energy_today,3,"kWh"))
-            e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
+            e2.metric(T["heat_sensor_total"],
+                      fmt(heat_energy_kwh(v.get("heat_energy_total")
+                                          or v.get("heat_energy")), 3, "kWh"))
 
         # ── Sol & Effekt — senaste två dagarna med data ───────
         hx_section(T["recent_2days"], "sun-power-icon.svg")
@@ -1890,7 +1900,8 @@ if page == "hist":
             fmt(ep_window, 3, "kWh"),
             help=T["energy_window_help"])
         ec2.metric(T["heat_sensor_total"],
-                   fmt(mwh_to_kwh(latest_val(df_hist,"heat_energy")), 3, "kWh"),
+                   fmt(heat_energy_kwh(latest_val(df_hist, "heat_energy_total")
+                                       or latest_val(df_hist, "heat_energy")), 3, "kWh"),
                    help=T["heat_help"])
 
         # ── Temporary: Three-method power correlation ────────────
@@ -1898,7 +1909,7 @@ if page == "hist":
             st.markdown(f"""
 **M1 — Power sensor:** Direct `power` reading, kW.
 **M2 — Flow×ΔT (physics):** `P = flow[l/min] × ρ × cp × (T_fwd − T_ret) / 60000 / 1000`, kW.
-**M3 — Heat energy counter:** Cumulative kWh delta since first sample (MWh×1000). Reset date unknown.
+**M3 — Heat energy counter:** Cumulative kWh delta since the first sample. Reset date unknown.
 
 **Instantaneous power chart** compares M1 vs M2. **Cumulative energy chart** compares all three from t₀.
 If M1 ≈ M2 → controller calculates power internally from flow×ΔT (not independent).
@@ -1947,7 +1958,7 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                 # M3: cumulative delta from t₀ in kWh
                 if "heat_energy" in base.columns and not base["heat_energy"].dropna().empty:
                     e0 = float(base["heat_energy"].dropna().iloc[0])
-                    base["heat_kwh_delta"] = (base["heat_energy"] - e0) * 1000
+                    base["heat_kwh_delta"] = base["heat_energy"] - e0   # already kWh
 
                 # ── Instantaneous power chart (M1 vs M2) ──────────
                 st.markdown(f'<div class="section-title">Instantaneous power — M1 vs M2 (kW)</div>',
@@ -2085,6 +2096,191 @@ Ratio M1/M2 reveals the actual cp of the fluid.
                                f"{'good agreement ✓' if 0.9 < m3_ratio < 1.1 else 'deviation — check calibration or reset'}")
             else:
                 st.info("Need flow, temp_forward and temp_return data in selected window.")
+
+
+        # ── Irradiance sensor vs DNI ──────────────────────────────────
+        with st.expander("🔆 Irradiance sensor vs DNI — what is this sensor seeing?",
+                         expanded=False):
+            st.markdown("""
+The irradiance sensor is a **silicon cell measuring global irradiance in its own
+plane**. A concentrator can only use the **direct beam**. The two are different
+quantities, so before any efficiency figure means anything we need to know what
+this sensor actually sees — and whether it is mounted flat or on the tracker.
+
+Two references are drawn against it:
+
+- **Clear-sky envelope**, computed here from the sun's position over Eket. It
+  needs no external data. On the clearest hours the sensor should approach one
+  of the two curves and never exceed it.
+- **STRÅNG DNI**, SMHI's modelled beam irradiance for these coordinates.
+""")
+            linke = st.slider("Linke turbidity — sky clarity for the envelope",
+                              2.0, 5.0, 3.0, 0.1,
+                              help="2.5–3 is a clean Nordic winter sky, 4–5 a hazy "
+                                   "summer one. Turn this only if the envelope sits "
+                                   "consistently off the clearest measured days.")
+
+            _irr = df_hist[df_hist["sensor"] == "irradiance"].copy()
+            # The history window can arrive from the bucketed path, which does
+            # not always carry the timezone through. Everything below assumes
+            # UTC-aware stamps.
+            _irr["created_at"] = pd.to_datetime(_irr["created_at"], utc=True)
+            irr_h = (_irr.set_index("created_at")["value"]
+                     .resample("1h").mean().dropna())
+
+            if irr_h.empty:
+                st.info("No irradiance readings in the selected window.")
+            else:
+                cs = clear_sky(irr_h.index, SITE_LAT, SITE_LON, linke=linke)
+                cmp_df = pd.DataFrame({"sensor": irr_h.values,
+                                       "ghi_clear": cs["ghi_clear"].values,
+                                       "dni_clear": cs["dni_clear"].values,
+                                       "elevation": cs["elevation"].values},
+                                      index=irr_h.index)
+
+                # STRÅNG DNI for the same hours, if it answers
+                _first = pd.Timestamp(cmp_df.index.min())
+                if _first.tzinfo is None:
+                    _first = _first.tz_localize("UTC")
+                days_span = max(1, int((pd.Timestamp.now(tz="UTC") - _first).days) + 1)
+                df_str, str_err = fetch_strang(min(days_span, 30))
+                if not df_str.empty:
+                    for name in ("dni_strang", "ghi_strang"):
+                        sub = df_str[df_str["sensor"] == name]
+                        if not sub.empty:
+                            ser = (sub.set_index("created_at")["value"]
+                                      .resample("1h").mean())
+                            cmp_df[name] = ser.reindex(cmp_df.index)
+
+                day = cmp_df[cmp_df["elevation"] > 5].copy()
+
+                # ── 1. The envelope ───────────────────────────────
+                st.markdown(f'<div class="hx-cap">Sensor against the clear-sky '
+                            f'envelope</div>', unsafe_allow_html=True)
+                fig_cs = go.Figure()
+                fig_cs.add_trace(go.Scatter(
+                    x=naive_swe(pd.Series(day.index)), y=day["sensor"],
+                    name="Sensor (W/m²)", mode="lines",
+                    line=dict(color=AMBER, width=2)))
+                fig_cs.add_trace(go.Scatter(
+                    x=naive_swe(pd.Series(day.index)), y=day["ghi_clear"],
+                    name="Clear-sky GHI (horizontal)", mode="lines",
+                    line=dict(color=SLATE, width=1.4, dash="dot")))
+                fig_cs.add_trace(go.Scatter(
+                    x=naive_swe(pd.Series(day.index)), y=day["dni_clear"],
+                    name="Clear-sky DNI (tracked)", mode="lines",
+                    line=dict(color=RUST, width=1.4, dash="dash")))
+                if "dni_strang" in day.columns:
+                    fig_cs.add_trace(go.Scatter(
+                        x=naive_swe(pd.Series(day.index)), y=day["dni_strang"],
+                        name="STRÅNG DNI", mode="lines",
+                        line=dict(color=TEAL, width=1.4)))
+                fig_cs.update_layout(
+                    height=300, margin=dict(l=0, r=0, t=10, b=0),
+                    yaxis_title="W/m²", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig_cs.update_xaxes(showgrid=False, color=MUTED)
+                fig_cs.update_yaxes(gridcolor=BORDER, color=MUTED)
+                st.plotly_chart(fig_cs, use_container_width=True, config=PLOT_CONFIG,
+                                key="cs_env")
+
+                # Which curve does the sensor follow? That is the mounting.
+                hi = day[day["elevation"] > 10]
+                hi = hi[hi["sensor"] > 0.1 * hi["dni_clear"].max()] if not hi.empty else hi
+                if len(hi) > 5:
+                    r_ghi = float((hi["sensor"] / hi["ghi_clear"]
+                                   .replace(0, np.nan)).median())
+                    r_dni = float((hi["sensor"] / hi["dni_clear"]
+                                   .replace(0, np.nan)).median())
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Sensor / clear-sky GHI", f"{r_ghi:.2f}",
+                              help="Near 1.0 on clear hours → mounted horizontally")
+                    m2.metric("Sensor / clear-sky DNI", f"{r_dni:.2f}",
+                              help="Near 1.0 on clear hours → mounted on the tracker")
+                    m3.metric("Peak reading", f"{day['sensor'].max():.0f} W/m²")
+                    verdict = ("looks **horizontal** — it tracks the GHI envelope"
+                               if abs(r_ghi - 1) < abs(r_dni - 1)
+                               else "looks **tracked** — it follows the DNI envelope")
+                    st.caption(f"On clear hours the sensor {verdict}. "
+                               f"A reading above both envelopes means the "
+                               f"calibration reads high, or the cell sees "
+                               f"reflected or concentrated light.")
+
+                # ── 2. Correlation against DNI ────────────────────
+                if "dni_strang" in day.columns and day["dni_strang"].notna().sum() > 5:
+                    both = day[["sensor", "dni_strang", "elevation",
+                                "ghi_clear"]].dropna()
+                    both = both[both["dni_strang"] > 20]
+                    a, b, r, n = fit_line(both["sensor"], both["dni_strang"])
+
+                    st.markdown('<div class="hx-cap">Sensor vs STRÅNG DNI</div>',
+                                unsafe_allow_html=True)
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Hours compared", f"{n}")
+                    c2.metric("Correlation r", "—" if r is None else f"{r:.3f}")
+                    c3.metric("Slope DNI/sensor", "—" if a is None else f"{a:.2f}")
+
+                    fig_sc = go.Figure()
+                    fig_sc.add_trace(go.Scatter(
+                        x=both["sensor"], y=both["dni_strang"], mode="markers",
+                        name="Hourly means",
+                        marker=dict(size=5, color=both["elevation"],
+                                    colorscale="Viridis", showscale=True,
+                                    colorbar=dict(title="Sun<br>elev °",
+                                                  thickness=10))))
+                    lim = float(max(both["sensor"].max(), both["dni_strang"].max()))
+                    fig_sc.add_trace(go.Scatter(
+                        x=[0, lim], y=[0, lim], mode="lines", name="1:1",
+                        line=dict(color=MUTED, width=1, dash="dot")))
+                    if a is not None:
+                        fig_sc.add_trace(go.Scatter(
+                            x=[0, lim], y=[b, a * lim + b], mode="lines",
+                            name=f"Fit: DNI = {a:.2f}·sensor + {b:.0f}",
+                            line=dict(color=RUST, width=2)))
+                    fig_sc.update_layout(
+                        height=380, margin=dict(l=0, r=0, t=10, b=0),
+                        xaxis_title="Sensor (W/m²)", yaxis_title="STRÅNG DNI (W/m²)",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    font=dict(size=10, color=MUTED, family="Inter")),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"))
+                    fig_sc.update_xaxes(gridcolor=BORDER, color=MUTED)
+                    fig_sc.update_yaxes(gridcolor=BORDER, color=MUTED)
+                    st.plotly_chart(fig_sc, use_container_width=True,
+                                    config=PLOT_CONFIG, key="cs_scatter")
+
+                    # Ratio against sun elevation: a fixed plane cannot hold a
+                    # constant ratio as the sun climbs, a tracker can.
+                    both = both.assign(ratio=both["sensor"] / both["dni_strang"])
+                    fig_ra = go.Figure()
+                    fig_ra.add_trace(go.Scatter(
+                        x=both["elevation"], y=both["ratio"], mode="markers",
+                        name="Sensor / DNI",
+                        marker=dict(size=5, color=SLATE, opacity=.55)))
+                    fig_ra.update_layout(
+                        height=300, margin=dict(l=0, r=0, t=10, b=0),
+                        xaxis_title="Solar elevation (°)",
+                        yaxis_title="Sensor / STRÅNG DNI",
+                        showlegend=False,
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"))
+                    fig_ra.update_xaxes(gridcolor=BORDER, color=MUTED)
+                    fig_ra.update_yaxes(gridcolor=BORDER, color=MUTED, range=[0, 2])
+                    st.markdown('<div class="hx-cap">Ratio against sun elevation'
+                                '</div>', unsafe_allow_html=True)
+                    st.plotly_chart(fig_ra, use_container_width=True,
+                                    config=PLOT_CONFIG, key="cs_ratio")
+                    st.caption("A flat cloud of points means the sensor sees the "
+                               "same share of the beam whatever the sun's height — "
+                               "that is tracking. A cloud that climbs with "
+                               "elevation is a fixed plane, where the cosine of "
+                               "the incidence angle changes through the day.")
+                elif str_err:
+                    st.warning("STRÅNG did not answer, so only the clear-sky "
+                               "envelope is shown: " + "; ".join(str_err.values()))
 
         with st.expander(f"📥 {T['raw_export']}"):
             piv2 = df_hist.pivot_table(
