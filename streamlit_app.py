@@ -1028,6 +1028,10 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
     mode="temp"         — cool blue → green → warm red gradient across full range
     """
     if val is None: val = mn
+    # The dial can only point somewhere on its own scale. A reading outside it
+    # would park the needle flat against the end and read as a fault, so clamp
+    # what the needle shows — the printed figure above it stays untouched.
+    val = max(mn, min(mx, val))
     decimals = 0 if unit in ("W/m²", "°C") else (1 if unit == "l/min" else 2)
 
     if mode == "temp":
@@ -1065,11 +1069,12 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
             "radius": "118%", "center": ["50%", "88%"],
             "axisLine": {"roundCap": True,
                          "lineStyle": {"width": 17, "color": colors}},
-            "pointer": {"length": "58%", "width": 7,
-                        "icon": "path://M2,0 L2,-1 L-2,-1 L-2,0 Z",
-                        "offsetCenter": [0, "2%"],
+            "pointer": {"length": "64%", "width": 11,
+                        # Wide at the hub, narrow at the tip.
+                        "icon": "path://M2,0 L0.6,-1 L-0.6,-1 L-2,0 Z",
+                        "offsetCenter": [0, "0%"],
                         "itemStyle": {"color": "#1A1D26"}},
-            "anchor": {"show": True, "size": 9, "showAbove": True,
+            "anchor": {"show": True, "size": 13, "showAbove": True,
                        "itemStyle": {"color": "#1A1D26"}},
             "axisTick":  {"show": False},
             "splitLine": {"show": False},
@@ -1239,9 +1244,11 @@ if page == "live":
             temp_specs = [
                 ("collector_r","temp_right_coll", 20,160,"g_cr"),
                 ("collector_l","temp_left_coll",  20,160,"g_cl"),
-                ("forward",    "temp_forward",    20,120,"g_fw"),
-                ("return",     "temp_return",     10,100,"g_rt"),
-                ("tank",       "temp_tank",       10,100,"g_tk"),
+                # Floors at zero: the design was drawn with summer numbers, but
+                # a 15 °C forward line in winter must still land on the scale.
+                ("forward",    "temp_forward",     0,120,"g_fw"),
+                ("return",     "temp_return",      0,100,"g_rt"),
+                ("tank",       "temp_tank",        0,100,"g_tk"),
             ]
             temp_specs = [t for t in temp_specs if v.get(t[1]) is not None]
             with st.container(border=True):
