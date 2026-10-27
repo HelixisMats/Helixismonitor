@@ -47,7 +47,7 @@ BG     = "#FFFFFF"; BG2 = "#F5F6FA"; BORDER = "#E6E9F2"
 TEXT   = "#10131A"; MUTED = "#8A90A8"; BLUE = "#2878F5"
 CARD_R = "18px"                      # card corner radius
 SHADOW = "0 2px 16px rgba(20,30,60,.07)"
-APP_BUILD = "2026-10-29"             # shown in the card, so it is obvious
+APP_BUILD = "2026-10-27 ui"          # shown in the card, so it is obvious
                                      # which version is actually deployed
 HERO   = "hero.jpg"                  # background render from the design
 ASSETS = "assets"                    # icons and logo exported from Figma
@@ -332,7 +332,11 @@ st.markdown(f"""<style>
   div[data-testid="stSidebarCollapseButton"],
   div[data-testid="stSidebarCollapsedControl"],
   div[data-testid="stSidebarResizeHandle"]{{display:none!important;}}
-  section[data-testid="stSidebar"] > div{{background:transparent!important;padding-top:2px;}}
+  /* The card's top edge is lined up with the first block in the content
+     column, so the page reads as a grid instead of three staggered starts.
+     The offset is the top bar's height plus the standard gap; re-measure it
+     if the top bar ever changes height. */
+  section[data-testid="stSidebar"] > div{{background:transparent!important;padding-top:30px;}}
   section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"]
     > div > div[data-testid="stVerticalBlock"]{{
     background:#fff;border-radius:{CARD_R};box-shadow:{SHADOW};
@@ -353,9 +357,17 @@ st.markdown(f"""<style>
   section[data-testid="stSidebar"] .stButton button[kind="primary"]:hover{{
     background:{BLUE};color:#fff;}}
 
-  /* Gauges | Kompakt — a segmented control built from st.radio */
+  /* Gauges | Kompakt — a segmented control built from st.radio.
+     width:100% matters: st.radio has no use_container_width, so without it
+     the group shrinks to its label text and sits narrower than the nav
+     buttons above it. */
+  /* Streamlit shrink-wraps the radio's element container to its label text,
+     so the group has to be widened from the container down — setting
+     width on the radiogroup alone resolves against a 158px parent. */
+  section[data-testid="stSidebar"] div[data-testid="stElementContainer"]:has(div[role="radiogroup"]),
+  section[data-testid="stSidebar"] div[data-testid="stRadio"]{{width:100%!important;}}
   section[data-testid="stSidebar"] div[role="radiogroup"]{{
-    display:flex;gap:0;background:#fff;border:1px solid {BORDER};
+    display:flex;gap:0;width:100%!important;background:#fff;border:1px solid {BORDER};
     border-radius:13px;padding:3px;}}
   section[data-testid="stSidebar"] div[role="radiogroup"] label{{
     flex:1;justify-content:center;margin:0!important;padding:6px 4px;
@@ -370,10 +382,19 @@ st.markdown(f"""<style>
     margin:0;font-size:.84rem;font-weight:600;}}
 
   /* ── Top bar ───────────────────────────────────────────────── */
-  .st-key-lang_en button,.st-key-lang_sv button,.st-key-acct button{{
+  /* Eng · Sve · account — one pill shape for all three. The account control
+     is a popover, not a button, so it needs its own selector. The rule used
+     to say `.st-key-acct button`, but the popover is created without a key,
+     so that selector matched nothing and the trigger kept Streamlit's
+     default 8px corners at 40px height beside two 36px pills. stPopoverButton
+     hits the trigger only — the Login and Log out buttons inside the panel
+     are portaled out of this element and keep their own styling. */
+  .st-key-lang_en button,.st-key-lang_sv button,
+  button[data-testid="stPopoverButton"]{{
     border:1px solid {BORDER};background:#fff;color:{MUTED};font-weight:600;
     font-size:.88rem;padding:6px 14px;min-height:0;border-radius:999px;
-    box-shadow:{SHADOW};width:100%;}}
+    box-shadow:{SHADOW};width:100%;
+    display:flex;align-items:center;justify-content:center;gap:4px;}}
   .st-key-lang_en button[kind="primary"],.st-key-lang_sv button[kind="primary"]{{
     color:{TEXT};background:#fff;border-color:{BLUE};}}
 
@@ -381,6 +402,7 @@ st.markdown(f"""<style>
   .hx-sec{{display:flex;align-items:center;gap:15px;background:#fff;
     border-radius:{CARD_R};box-shadow:{SHADOW};padding:13px 22px;
     margin:22px 0 -4px;position:relative;z-index:2;}}
+  .hx-sec.first{{margin-top:0;}}
   .hx-sec svg{{width:34px;height:34px;flex:0 0 34px;}}
   .hx-sec .ttl{{font-size:.95rem;font-weight:800;letter-spacing:.06em;
     text-transform:uppercase;color:{TEXT};}}
@@ -397,6 +419,16 @@ st.markdown(f"""<style>
     box-shadow:{SHADOW};padding:26px 12px 10px;margin-top:0;}}
   div[data-testid="stLayoutWrapper"]:has(div[data-testid="stBidiComponentRegular"]) > div{{
     border:none!important;}}
+  /* st.container(border=True) puts 15px of padding on the block that holds
+     the card, which left every dial panel inset from the section header
+     above it. No :not() here, unlike the rule above: the dials sit in
+     columns, and a column is itself a stVerticalBlock holding a dial, so
+     the innermost-only test excludes exactly the block we are after. The
+     outer blocks this also matches carry no padding, so zeroing them is a
+     no-op — the only one that moves is the 15px container. */
+  div[data-testid="stVerticalBlock"]:has(
+    > div[data-testid="stLayoutWrapper"] div[data-testid="stBidiComponentRegular"]){{
+    padding:0!important;}}
   div[data-testid="stPlotlyChart"]{{
     background:#fff;border-radius:{CARD_R};box-shadow:{SHADOW};padding:12px 10px;}}
   div[data-testid="stBidiComponentRegular"],
@@ -425,6 +457,9 @@ st.markdown(f"""<style>
 
   .section-title{{font-size:.68rem;font-weight:700;color:{TEXT};text-transform:uppercase;
     letter-spacing:.1em;margin:20px 0 10px;border-left:3px solid {BLUE};padding-left:10px;}}
+  /* The first heading on a page carries no top margin — its 20px would push
+     the content column below the left card and break the shared top edge. */
+  .section-title.first{{margin-top:0;}}
 
   .status-dot{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;}}
   .ts-text{{font-size:.85rem;color:{TEXT};vertical-align:middle;font-weight:500;}}
@@ -1181,10 +1216,17 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
     }
 
 
-def hx_section(title, icon_file):
-    """Section header drawn as a card with the exported round icon."""
+def hx_section(title, icon_file, first=False):
+    """Section header drawn as a card with the exported round icon.
+
+    first=True drops the top margin, so the opening header lines up with the
+    top edge of the left card. Passed explicitly rather than counted: the
+    Live page runs inside a fragment that re-executes on its own, and a
+    counter would lose track of which header is first after the first rerun.
+    """
+    cls = "hx-sec first" if first else "hx-sec"
     ico = _asset(icon_file) or ""
-    st.markdown(f'<div class="hx-sec">{ico}<div class="ttl">{title}</div></div>',
+    st.markdown(f'<div class="{cls}">{ico}<div class="ttl">{title}</div></div>',
                 unsafe_allow_html=True)
 
 
@@ -1331,7 +1373,7 @@ if page == "live":
             # reporting. The new PLC block does not send temp_right_coll /
             # temp_left_coll, and a gauge with no value silently parks its needle
             # at the scale minimum — 20 °C, which reads like a measurement.
-            hx_section(T["temperatures"], "temperatures-icon.svg")
+            hx_section(T["temperatures"], "temperatures-icon.svg", first=True)
             temp_specs = [
                 ("collector_r","temp_right_coll", 20,160,"g_cr"),
                 ("collector_l","temp_left_coll",  20,160,"g_cl"),
@@ -1649,7 +1691,7 @@ if page == "hist":
 
     df_daily = fetch_daily_summary(days=90)
     if not df_daily.empty:
-        st.markdown(f'<div class="section-title">{T["overview_title"]}</div>',
+        st.markdown(f'<div class="section-title first">{T["overview_title"]}</div>',
                     unsafe_allow_html=True)
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Bar(
