@@ -5,7 +5,7 @@ Tabs: Live (gauges) | Historik | SMHI & Analys
 
 import streamlit as st
 from supabase import create_client
-from streamlit_echarts import st_echarts, JsCode
+from streamlit_echarts import st_echarts
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
@@ -45,6 +45,8 @@ BG     = "#FFFFFF"; BG2 = "#F5F6FA"; BORDER = "#E6E9F2"
 TEXT   = "#10131A"; MUTED = "#8A90A8"; BLUE = "#2878F5"
 CARD_R = "18px"                      # card corner radius
 SHADOW = "0 2px 16px rgba(20,30,60,.07)"
+APP_BUILD = "2026-10-27"             # shown in the card, so it is obvious
+                                     # which version is actually deployed
 HERO   = "hero.jpg"                  # background render from the design
 ASSETS = "assets"                    # icons and logo exported from Figma
 TEAL   = "#167A5E"; AMBER = "#B87200"; RUST = "#A83030"; SLATE = "#2E5EA0"
@@ -244,19 +246,38 @@ SMHI = {
 # left card — it is already a fixed left panel, so no column juggling.
 import base64 as _b64
 
+# The exported artwork is carried in the file itself. It used to be read
+# from an assets/ folder, and when that folder did not follow the app to
+# the server the logo silently fell back to plain text and the section
+# icons vanished — with no error to explain why.
+_ASSET_SVG = {
+"helixis-logo.svg": "<svg width=\"250\" height=\"64\" viewBox=\"0 0 250 64\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_67_9)\"><path d=\"M52.2592 31.4004V17.4439C50.1198 15.3181 48.9198 14.1258 46.7804 12H32.7344L52.2592 31.4004Z\" fill=\"#2878F5\"/><path d=\"M25.0832 32.4003L32.5311 24.9998L19.4479 12H12V19.4004L25.0832 32.4003Z\" fill=\"#2878F5\"/><path d=\"M12 32.5996V46.5561C14.1394 48.6819 15.3394 49.8742 17.4788 52H31.5248L12 32.5996Z\" fill=\"#2878F5\"/><path d=\"M39.1745 31.5996L31.7266 39.0001L44.8098 51.9999H52.2577V44.5994L39.1745 31.5996Z\" fill=\"#2878F5\"/><path d=\"M87.2174 29.6852H71.2055V17.5938H64.3438V48.0493H71.2055V35.8218H87.2174V48.0493H94.0799V17.5938H87.2174V29.6852Z\" fill=\"#1C262C\"/><path d=\"M99.6639 17.5938H97.7422V48.0493H99.6639H104.605H123.681V41.9127H104.605V35.7761H122.995V29.6852H104.605V23.7304H123.681V17.5938H104.605H99.6639Z\" fill=\"#1C262C\"/><path d=\"M133.651 17.5938H126.789V48.0493H128.711H133.651H151.905V41.9127H133.651V17.5938Z\" fill=\"#1C262C\"/><path d=\"M161.51 17.5938H154.648V48.0493H161.51V17.5938Z\" fill=\"#1C262C\"/><path d=\"M198.38 17.5938H189.413L181.133 28.4578H180.63L172.029 17.5938H163.062L175.003 32.5037V33.0033L163.062 48.0493H172.029L180.355 37.0493H180.859L189.413 48.0493H198.38L186.486 33.14V32.6397L198.38 17.5938Z\" fill=\"#1C262C\"/><path d=\"M206.846 17.5938H199.984V48.0493H206.846V17.5938Z\" fill=\"#1C262C\"/><path d=\"M237.088 35.2536C236.477 34.0876 235.495 33.0946 234.137 32.2759C232.78 31.4578 230.958 30.8667 228.671 30.5031L220.07 29.1396C219.216 28.9885 218.529 28.8067 218.011 28.5942C217.492 28.3823 217.111 28.087 216.868 27.7078C216.623 27.3291 216.502 26.8521 216.502 26.2759C216.502 25.6096 216.7 25.0642 217.097 24.6398C217.493 24.216 218.156 23.8975 219.086 23.685C220.016 23.4731 221.305 23.3672 222.952 23.3672C224.995 23.3672 226.567 23.5114 227.664 23.7991C228.762 24.0875 229.517 24.5344 229.929 25.14C230.341 25.7469 230.546 26.5342 230.546 27.504V28.1403H237.454V27.8676C237.454 25.7469 236.951 23.8756 235.944 22.2538C234.938 20.6327 233.421 19.3751 231.392 18.4806C229.364 17.5872 226.779 17.1396 223.638 17.1396C221.045 17.1396 218.857 17.4123 217.073 17.9577C215.289 18.5031 213.848 19.2234 212.75 20.1168C211.652 21.0107 210.852 22.0187 210.348 23.1396C209.845 24.2611 209.594 25.3977 209.594 26.5486C209.594 28.2155 209.944 29.6329 210.646 30.799C211.348 31.9656 212.346 32.8978 213.643 33.5943C214.939 34.292 216.502 34.7916 218.332 35.0944L226.932 36.3219C228.488 36.5946 229.578 36.9431 230.204 37.3675C230.828 37.7919 231.141 38.474 231.141 39.4131C231.141 40.0801 230.958 40.6255 230.592 41.0499C230.226 41.4743 229.555 41.7846 228.58 41.9814C227.603 42.1789 226.201 42.2767 224.371 42.2767C222.297 42.2767 220.711 42.1407 219.613 41.8673C218.515 41.594 217.76 41.1702 217.349 40.5948C216.937 40.0193 216.731 39.2614 216.731 38.3223V37.5042H209.869V37.7769C209.869 40.1409 210.433 42.1181 211.562 43.7092C212.69 45.3002 214.337 46.4976 216.503 47.3006C218.668 48.103 221.291 48.5055 224.372 48.5055C227.604 48.5055 230.228 48.066 232.24 47.1871C234.253 46.3089 235.717 45.1491 236.632 43.7098C237.547 42.2711 238.004 40.732 238.004 39.0959C238.004 37.7023 237.699 36.4215 237.089 35.2549L237.088 35.2536Z\" fill=\"#1C262C\"/></g><defs><clipPath id=\"clip0_67_9\"><rect width=\"226\" height=\"40\" fill=\"white\" transform=\"translate(12 12)\"/></clipPath></defs></svg>",
+"temperatures-icon.svg": "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"40\" height=\"40\" rx=\"20\" fill=\"#2878F5\"/><path d=\"M20 10V12\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M20.0001 16C19.085 15.9995 18.1974 16.3129 17.4854 16.8877C16.7733 17.4625 16.28 18.2641 16.0875 19.1588C15.8951 20.0534 16.0152 20.987 16.4278 21.8038C16.8405 22.6205 17.5207 23.2711 18.3551 23.647\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M10 20H12\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M28 22.54C28.7626 22.9803 29.3586 23.6599 29.6955 24.4734C30.0325 25.2869 30.0916 26.1888 29.8637 27.0394C29.6358 27.8899 29.1336 28.6415 28.435 29.1775C27.7365 29.7136 26.8805 30.0041 26 30.0041C25.1195 30.0041 24.2635 29.7136 23.565 29.1775C22.8664 28.6415 22.3642 27.8899 22.1363 27.0394C21.9084 26.1888 21.9675 25.2869 22.3045 24.4734C22.6415 23.6599 23.2374 22.9803 24 22.54V12C24 11.4696 24.2107 10.9609 24.5858 10.5858C24.9609 10.2107 25.4696 10 26 10C26.5304 10 27.0391 10.2107 27.4142 10.5858C27.7893 10.9609 28 11.4696 28 12V22.54Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M12.9302 12.9302L14.3402 14.3402\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M14.3402 25.6602L12.9302 27.0702\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/></svg>",
+"Flow-icon.svg": "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"40\" height=\"40\" rx=\"20\" fill=\"#2878F5\"/><path d=\"M20 22L24 18\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M11.34 27C10.4622 25.4798 10.0001 23.7553 10 21.9999C9.99993 20.2445 10.462 18.52 11.3396 16.9997C12.2173 15.4795 13.4797 14.217 14.9999 13.3393C16.5201 12.4616 18.2446 11.9995 20 11.9995C21.7554 11.9995 23.4799 12.4616 25.0001 13.3393C26.5203 14.217 27.7827 15.4795 28.6604 16.9997C29.538 18.52 30.0001 20.2445 30 21.9999C29.9999 23.7553 29.5378 25.4798 28.66 27\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/></svg>",
+"energy-icon.svg": "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"40\" height=\"40\" rx=\"20\" fill=\"#2878F5\"/><path d=\"M23.9142 12.0002C24.0273 11.6795 24.0282 11.33 23.9166 11.0088C23.805 10.6876 23.5877 10.4138 23.3001 10.2324C23.0125 10.051 22.6719 9.9726 22.3339 10.0102C21.996 10.0477 21.6809 10.199 21.4402 10.4392L12.4402 19.4392C12.2303 19.6489 12.0874 19.9161 12.0294 20.2071C11.9714 20.4981 12.0011 20.7997 12.1145 21.0738C12.228 21.3479 12.4202 21.5823 12.6668 21.7472C12.9135 21.912 13.2035 22.0001 13.5002 22.0002H17.5022C17.582 22.0003 17.6607 22.0195 17.7316 22.0563C17.8026 22.093 17.8636 22.1462 17.9098 22.2115C17.9559 22.2767 17.9857 22.352 17.9967 22.4311C18.0078 22.5102 17.9997 22.5908 17.9732 22.6662L16.0862 28.0002C15.973 28.3209 15.9722 28.6706 16.0838 28.9919C16.1955 29.3131 16.4131 29.5869 16.7008 29.7683C16.9886 29.9497 17.3294 30.0278 17.6675 29.99C18.0055 29.9522 18.3206 29.8006 18.5612 29.5602L27.5612 20.5602C27.7707 20.3503 27.9134 20.0831 27.9711 19.7922C28.0289 19.5013 27.9991 19.1998 27.8856 18.9258C27.772 18.6519 27.5798 18.4177 27.3332 18.253C27.0866 18.0882 26.7967 18.0002 26.5002 18.0002H22.5032C22.4231 18.0003 22.3442 17.9811 22.273 17.9444C22.2019 17.9076 22.1406 17.8543 22.0943 17.789C22.0481 17.7236 22.0182 17.6481 22.0072 17.5688C21.9962 17.4894 22.0044 17.4086 22.0312 17.3332L23.9142 12.0002Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/></svg>",
+"sun-power-icon.svg": "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"40\" height=\"40\" rx=\"20\" fill=\"#2878F5\"/><path d=\"M24 20C24 22.2091 22.2091 24 20 24C17.7909 24 16 22.2091 16 20C16 17.7909 17.7909 16 20 16C22.2091 16 24 17.7909 24 20Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M20 10V12\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M20 28V30\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M12.9302 12.9302L14.3402 14.3402\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M25.6602 25.6602L27.0702 27.0702\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M10 20H12\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M28 20H30\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M14.3402 25.6602L12.9302 27.0702\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M27.0702 12.9302L25.6602 14.3402\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/></svg>",
+"last24hr-icon.svg": "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"40\" height=\"40\" rx=\"20\" fill=\"#2878F5\"/><path d=\"M20 15V20L24 22\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M24 16H29V11\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/><path d=\"M29 16L26.7 13.7C24.8976 11.971 22.4977 11.0038 20 11C18.22 11 16.4799 11.5278 14.9999 12.5168C13.5198 13.5057 12.3663 14.9113 11.6851 16.5558C11.0039 18.2004 10.8257 20.01 11.1729 21.7558C11.5202 23.5016 12.3774 25.1053 13.636 26.364C14.8947 27.6226 16.4984 28.4798 18.2442 28.8271C19.99 29.1743 21.7996 28.9961 23.4442 28.3149C25.0887 27.6337 26.4943 26.4802 27.4832 25.0001C28.4722 23.5201 29 21.78 29 20\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#F3F3F3\"/></svg>",
+"live-icon-active.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M12.1851 5.8208C13.0273 6.66449 13.5003 7.80791 13.5003 9.00005C13.5003 10.1922 13.0273 11.3356 12.1851 12.1793\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M14.3062 3.69971C15.7108 5.10598 16.4998 7.01233 16.4998 8.99996C16.4998 10.9876 15.7108 12.8939 14.3062 14.3002\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M3.69365 14.3002C2.28899 12.8939 1.5 10.9876 1.5 8.99996C1.5 7.01233 2.28899 5.10598 3.69365 3.69971\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M5.8148 12.1793C4.97256 11.3356 4.49951 10.1922 4.49951 9.00005C4.49951 7.80791 4.97256 6.66449 5.8148 5.8208\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M10.5 9C10.5 9.82843 9.82843 10.5 9 10.5C8.17157 10.5 7.5 9.82843 7.5 9C7.5 8.17157 8.17157 7.5 9 7.5C9.82843 7.5 10.5 8.17157 10.5 9Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/></svg>",
+"live-icon-normal.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M12.1851 5.8208C13.0273 6.66449 13.5003 7.80791 13.5003 9.00005C13.5003 10.1922 13.0273 11.3356 12.1851 12.1793\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M14.3062 3.69971C15.7108 5.10598 16.4998 7.01233 16.4998 8.99996C16.4998 10.9876 15.7108 12.8939 14.3062 14.3002\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M3.69365 14.3002C2.28899 12.8939 1.5 10.9876 1.5 8.99996C1.5 7.01233 2.28899 5.10598 3.69365 3.69971\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M5.8148 12.1793C4.97256 11.3356 4.49951 10.1922 4.49951 9.00005C4.49951 7.80791 4.97256 6.66449 5.8148 5.8208\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M10.5 9C10.5 9.82843 9.82843 10.5 9 10.5C8.17157 10.5 7.5 9.82843 7.5 9C7.5 8.17157 8.17157 7.5 9 7.5C9.82843 7.5 10.5 8.17157 10.5 9Z\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/></svg>",
+"History-icon-active.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M12 9.75V11.4L13.2 12.15\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M2.25 9H4.8435\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M2.25 14.25H5.124\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M2.25 3.75H15.75\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M16.5 11.25C16.5 13.7353 14.4853 15.75 12 15.75C9.51472 15.75 7.5 13.7353 7.5 11.25C7.5 8.76472 9.51472 6.75 12 6.75C14.4853 6.75 16.5 8.76472 16.5 11.25Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/></svg>",
+"History-icon-normal.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M12 9.75V11.4L13.2 12.15\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M2.25 9H4.8435\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M2.25 14.25H5.124\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M2.25 3.75H15.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M16.5 11.25C16.5 13.7353 14.4853 15.75 12 15.75C9.51472 15.75 7.5 13.7353 7.5 11.25C7.5 8.76472 9.51472 6.75 12 6.75C14.4853 6.75 16.5 8.76472 16.5 11.25Z\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/></svg>",
+"About-icon-active.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_67_509)\"><path d=\"M16.5 9C16.5 13.1421 13.1421 16.5 9 16.5C4.85786 16.5 1.5 13.1421 1.5 9C1.5 4.85786 4.85786 1.5 9 1.5C13.1421 1.5 16.5 4.85786 16.5 9Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M9 12V9\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/><path d=\"M9 6H9.0075\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#FDFDFD\"/></g><defs><clipPath id=\"clip0_67_509\"><rect width=\"18\" height=\"18\" fill=\"white\"/></clipPath></defs></svg>",
+"About-icon-normal.svg": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M16.5 9C16.5 13.1421 13.1421 16.5 9 16.5C4.85786 16.5 1.5 13.1421 1.5 9C1.5 4.85786 4.85786 1.5 9 1.5C13.1421 1.5 16.5 4.85786 16.5 9Z\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M9 12V9\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M9 6H9.0075\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/></svg>",
+"Login-icon.svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M17 8C17 10.7614 14.7614 13 12 13C9.23858 13 7 10.7614 7 8C7 5.23858 9.23858 3 12 3C14.7614 3 17 5.23858 17 8Z\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/><path d=\"M20 21C20 18.8783 19.1571 16.8434 17.6569 15.3431C16.1566 13.8429 14.1217 13 12 13C9.87827 13 7.84344 13.8429 6.34315 15.3431C4.84285 16.8434 4 18.8783 4 21\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke=\"#1C262C\"/></svg>"
+}
+
+
 def _asset(name):
-    """Inline an exported SVG so it stays crisp and needs no extra request."""
+    """The exported SVG, inline so it stays crisp and needs no extra file."""
+    if name in _ASSET_SVG:
+        return _ASSET_SVG[name]
     path = os.path.join(ASSETS, name)
-    if not os.path.exists(path):
-        return ""
-    return open(path, encoding="utf-8").read()
+    return open(path, encoding="utf-8").read() if os.path.exists(path) else ""
 
 
 def _asset_b64(name):
-    path = os.path.join(ASSETS, name)
-    if not os.path.exists(path):
-        return ""
-    return _b64.b64encode(open(path, "rb").read()).decode()
+    svg = _asset(name)
+    return _b64.b64encode(svg.encode("utf-8")).decode() if svg else ""
 
 
 if os.path.exists(HERO):
@@ -300,7 +321,15 @@ st.markdown(f"""<style>
     border-radius:24px;}}
 
   /* ── Left card (Streamlit's sidebar) ───────────────────────── */
-  section[data-testid="stSidebar"]{{background:transparent!important;border:none!important;}}
+  /* The card is the only way to reach History and About, so it must not be
+     collapsible: a folded sidebar left the app looking like it had lost half
+     its navigation. */
+  section[data-testid="stSidebar"]{{background:transparent!important;border:none!important;
+    transform:none!important;visibility:visible!important;
+    min-width:320px!important;width:320px!important;}}
+  div[data-testid="stSidebarCollapseButton"],
+  div[data-testid="stSidebarCollapsedControl"],
+  div[data-testid="stSidebarResizeHandle"]{{display:none!important;}}
   section[data-testid="stSidebar"] > div{{background:transparent!important;padding-top:2px;}}
   section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"]
     > div > div[data-testid="stVerticalBlock"]{{
@@ -380,8 +409,12 @@ st.markdown(f"""<style>
   .hx-g-val{{font-size:2.45rem;font-weight:400;color:{TEXT};text-align:center;
     line-height:1.15;margin-top:4px;}}
   .hx-g-val span{{font-size:1.05rem;font-weight:400;color:{MUTED};margin-left:4px;}}
-  .hx-g-rng{{display:flex;justify-content:space-between;font-size:.74rem;
-    color:{MUTED};padding:0 10px;margin-top:-12px;}}
+  /* Small captions for the charts. They sit outside a card, straight on the
+     render, so they carry their own backing. */
+  .hx-cap{{display:inline-block;background:#fff;border-radius:10px;
+    padding:5px 12px;margin:14px 0 6px;font-size:.72rem;font-weight:700;
+    letter-spacing:.07em;text-transform:uppercase;color:{TEXT};
+    box-shadow:{SHADOW};}}
 
   /* Metric tiles */
   div[data-testid="metric-container"]{{background:{BG2};border:1px solid {BORDER};border-radius:12px;padding:14px 18px;}}
@@ -1078,17 +1111,15 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
                        "itemStyle": {"color": "#1A1D26"}},
             "axisTick":  {"show": False},
             "splitLine": {"show": False},
-            # The scale, printed just inside the arc. The two ends are blanked
-            # out here because they are already spelled out with their unit
-            # under the dial — showing them twice only adds clutter.
+            # The scale, printed just inside the arc, ends included. An
+            # earlier version hid the two ends with a JavaScript formatter so
+            # they would not repeat the labels under the dial — but whether a
+            # formatter survives depends on the streamlit-echarts version, and
+            # where it did not the whole scale disappeared without a word.
+            # Plain options only: what is drawn here is drawn everywhere.
             "splitNumber": 5,
-            "axisLabel": {"show": True, "distance": 11, "fontSize": 10,
-                          "color": "#9AA1B4",
-                          # Parentheses around the bounds: a negative minimum
-                          # such as -25 would otherwise build "v--25".
-                          "formatter": JsCode(
-                              "function(v){return (Math.abs(v-(%s))<1e-9||"
-                              "Math.abs(v-(%s))<1e-9)?'':v;}" % (mn, mx))},
+            "axisLabel": {"show": True, "distance": 12, "fontSize": 10,
+                          "color": "#8A90A8"},
             "detail": {"show": False},
             "title": {"show": False},
             "data": [{"value": round(float(val), decimals)}],
@@ -1114,10 +1145,6 @@ def render_echarts_gauge(label, val, mn, mx, unit,
     opt = echarts_gauge(label, val, mn, mx, unit, green_end, warn_start, mode)
     st_echarts(options=opt, height=f"{height}px",
                key=key or f"g_{label}_{mn}_{mx}")
-    _fmt_end = (lambda x: f"{x:g}")
-    st.markdown(f'<div class="hx-g-rng"><span>{_fmt_end(mn)}{unit if unit=="°C" else ""}</span>'
-                f'<span>{_fmt_end(mx)}{unit if unit=="°C" else ""}</span></div>',
-                unsafe_allow_html=True)
 
 # ── Top bar ───────────────────────────────────────────────────
 if "lang" not in st.session_state:
@@ -1314,8 +1341,7 @@ if page == "live":
                 ch1, ch2 = st.columns(2)
 
                 with ch1:
-                    st.markdown(f"<div style='font-size:.75rem;font-weight:600;color:{MUTED};"
-                                f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                    st.markdown(f"<div class='hx-cap'>"
                                 f"Hourly energy today (kWh)</div>", unsafe_allow_html=True)
                     if not pwr_today.empty:
                         hourly = pwr_today.groupby(pwr_today["ts_swe"].dt.hour)["e_kwh"].sum().reset_index()
@@ -1337,8 +1363,7 @@ if page == "live":
                         st.caption("No data for today yet")
 
                 with ch2:
-                    st.markdown(f"<div style='font-size:.75rem;font-weight:600;color:{MUTED};"
-                                f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px'>"
+                    st.markdown(f"<div class='hx-cap'>"
                                 f"Daily energy — last 7 days (kWh)</div>", unsafe_allow_html=True)
                     daily = pwr_all.groupby(pwr_all["ts_swe"].dt.date)["e_kwh"].sum().reset_index()
                     daily.columns = ["date","kwh"]
@@ -1500,8 +1525,7 @@ if page == "live":
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     font=dict(color=MUTED, family="Inter"))
                 fig24_t.update_xaxes(showgrid=False, color=MUTED)
-                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
-                            f"text-transform:uppercase;letter-spacing:.08em;margin:4px 0'>"
+                st.markdown(f"<div class='hx-cap'>"
                             f"{T['temperatures']}</div>", unsafe_allow_html=True)
                 st.plotly_chart(fig24_t, use_container_width=True,
                                 config=PLOT_CONFIG, key="live24_temp")
@@ -1539,8 +1563,7 @@ if page == "live":
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     font=dict(color=MUTED, family="Inter"))
                 fig24_d.update_xaxes(showgrid=False, color=MUTED)
-                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
-                            f"text-transform:uppercase;letter-spacing:.08em;margin:10px 0 4px'>"
+                st.markdown(f"<div class='hx-cap'>"
                             f"{T['section_dt_flow']}</div>", unsafe_allow_html=True)
                 st.plotly_chart(fig24_d, use_container_width=True,
                                 config=PLOT_CONFIG, key="live24_dtflow")
@@ -2093,8 +2116,7 @@ if is_internal:
             }
 
         # Show buttons for last 14 days, grouped in rows of 7
-        st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
-                    f"text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px'>"
+        st.markdown(f"<div class='hx-cap'>"
                     f"Select days for analysis</div>", unsafe_allow_html=True)
 
         # Row 1: last 7 days
@@ -2684,5 +2706,6 @@ Max temp: 160°C · Max pressure: 6 bar
 with st.sidebar:
     st.markdown(f"<div style='color:{TEXT};font-weight:600;font-size:.9rem;margin-bottom:8px'>Helixis LC10</div>",
                 unsafe_allow_html=True)
-    st.markdown(f"<div style='font-size:.72rem;color:{MUTED}'>Eket · Örkelljunga · 56.248°N</div>",
+    st.markdown(f"<div style='font-size:.72rem;color:{MUTED}'>Eket · Örkelljunga · 56.248°N"
+                f"<br><span style='font-size:.62rem;opacity:.75'>build {APP_BUILD}</span></div>",
                 unsafe_allow_html=True)
