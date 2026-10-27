@@ -38,11 +38,15 @@ def send_alert_email(age_min: float):
         pass  # Never crash the app due to email failure
 
 st.set_page_config(page_title="Helixis LC Monitor", page_icon="🌀",
-                   layout="wide", initial_sidebar_state="collapsed")
+                   layout="wide", initial_sidebar_state="expanded")
 
 SWE    = ZoneInfo("Europe/Stockholm")
-BG     = "#FFFFFF"; BG2 = "#F5F6FA"; BORDER = "#DDE0EB"
-TEXT   = "#1C2033"; MUTED = "#8A90A8"; BLUE = "#1F4FE0"
+BG     = "#FFFFFF"; BG2 = "#F5F6FA"; BORDER = "#E6E9F2"
+TEXT   = "#10131A"; MUTED = "#8A90A8"; BLUE = "#2878F5"
+CARD_R = "18px"                      # card corner radius
+SHADOW = "0 2px 16px rgba(20,30,60,.07)"
+HERO   = "hero.jpg"                  # background render from the design
+ASSETS = "assets"                    # icons and logo exported from Figma
 TEAL   = "#167A5E"; AMBER = "#B87200"; RUST = "#A83030"; SLATE = "#2E5EA0"
 LGRAY  = "#E4E7F0"
 SITE_LAT, SITE_LON = 56.248, 13.192
@@ -233,41 +237,165 @@ SMHI = {
     "humidity":    ("6",  "63600"),   # Relative humidity
 }
 
+# ── Page chrome ───────────────────────────────────────────────
+# The layout follows the Figma proposal: a light page with an optional
+# background render, a floating card on the left holding status and
+# navigation, and white cards on the right. Streamlit's own sidebar is that
+# left card — it is already a fixed left panel, so no column juggling.
+import base64 as _b64
+
+def _asset(name):
+    """Inline an exported SVG so it stays crisp and needs no extra request."""
+    path = os.path.join(ASSETS, name)
+    if not os.path.exists(path):
+        return ""
+    return open(path, encoding="utf-8").read()
+
+
+def _asset_b64(name):
+    path = os.path.join(ASSETS, name)
+    if not os.path.exists(path):
+        return ""
+    return _b64.b64encode(open(path, "rb").read()).decode()
+
+
+if os.path.exists(HERO):
+    _mime = "image/jpeg" if HERO.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    _hero_b64 = _b64.b64encode(open(HERO, "rb").read()).decode()
+    # Fixed, so the render stays put while the cards scroll over it.
+    _hero_css = ("background-image:url('data:" + _mime + ";base64," + _hero_b64 +
+                 "');background-size:cover;background-position:center left;"
+                 "background-repeat:no-repeat;background-attachment:fixed;")
+else:
+    _hero_css = ("background-image:linear-gradient(170deg,#E9ECF2 0%,"
+                 "#F4F6F9 30%,#FFFFFF 58%);")
+
+_NAV_ICONS = {"live": ("live-icon-normal.svg", "live-icon-active.svg"),
+              "hist": ("History-icon-normal.svg", "History-icon-active.svg"),
+              "about": ("About-icon-normal.svg", "About-icon-active.svg")}
+_nav_icon_css = ""
+for _k, (_n, _a) in _NAV_ICONS.items():
+    for _kind, _f in (("secondary", _n), ("primary", _a)):
+        _b = _asset_b64(_f)
+        if _b:
+            _nav_icon_css += (
+                f'.st-key-nav_{_k} button[kind="{_kind}"]::before{{content:"";'
+                f'display:inline-block;width:19px;height:19px;margin-right:11px;'
+                f'flex:0 0 19px;background:url("data:image/svg+xml;base64,{_b}")'
+                f' center/contain no-repeat;}}')
+
 st.markdown(f"""<style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
   header[data-testid="stHeader"]{{background:transparent!important;height:0!important;}}
   #MainMenu,footer{{visibility:hidden;}}
-  html,body,[class*="css"]{{font-family:'Inter',-apple-system,sans-serif!important;background:{BG};color:{TEXT};}}
-  .block-container{{padding-top:1.2rem!important;padding-bottom:1.5rem;background:{BG};max-width:1400px;}}
-  .stApp{{background:{BG};}}
-  section[data-testid="stSidebar"]{{background:{BG2};border-right:1px solid {BORDER};}}
+  html,body,[class*="css"]{{font-family:'Inter',-apple-system,sans-serif!important;color:{TEXT};}}
+  .stApp{{{_hero_css}}}
+  .block-container{{padding-top:1.1rem!important;padding-bottom:2rem;max-width:1560px;}}
+  /* A soft veil over the content column. The render stays visible down the
+     left side and around the cards, but small captions that sit outside a
+     card are still readable against it. */
+  div[data-testid="stMainBlockContainer"]{{
+    background:linear-gradient(90deg,rgba(255,255,255,0) 0,
+      rgba(255,255,255,.72) 90px,rgba(255,255,255,.80) 100%);
+    border-radius:24px;}}
+
+  /* ── Left card (Streamlit's sidebar) ───────────────────────── */
+  section[data-testid="stSidebar"]{{background:transparent!important;border:none!important;}}
+  section[data-testid="stSidebar"] > div{{background:transparent!important;padding-top:2px;}}
+  section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"]
+    > div > div[data-testid="stVerticalBlock"]{{
+    background:#fff;border-radius:{CARD_R};box-shadow:{SHADOW};
+    padding:18px 16px 16px;gap:.55rem;}}
+  .hx-status{{font-size:.82rem;font-weight:700;color:{TEXT};line-height:1.9;}}
+  .hx-status .sub{{font-weight:500;color:{MUTED};}}
+  .hx-rule{{border:none;border-top:1px solid {BORDER};margin:12px 0 14px;}}
+
+  /* Nav buttons */
+  section[data-testid="stSidebar"] .stButton button{{
+    width:100%;justify-content:flex-start;text-align:left;
+    background:#fff;color:{TEXT};border:1px solid {BORDER};
+    border-radius:13px;padding:9px 14px;font-weight:600;font-size:.92rem;
+    box-shadow:none;transition:border-color .12s ease,background .12s ease;}}
+  section[data-testid="stSidebar"] .stButton button:hover{{border-color:{BLUE};color:{BLUE};}}
+  section[data-testid="stSidebar"] .stButton button[kind="primary"]{{
+    background:{BLUE};color:#fff;border-color:{BLUE};}}
+  section[data-testid="stSidebar"] .stButton button[kind="primary"]:hover{{
+    background:{BLUE};color:#fff;}}
+
+  /* Gauges | Kompakt — a segmented control built from st.radio */
+  section[data-testid="stSidebar"] div[role="radiogroup"]{{
+    display:flex;gap:0;background:#fff;border:1px solid {BORDER};
+    border-radius:13px;padding:3px;}}
+  section[data-testid="stSidebar"] div[role="radiogroup"] label{{
+    flex:1;justify-content:center;margin:0!important;padding:6px 4px;
+    border-radius:10px;font-size:.84rem;font-weight:600;color:{MUTED};
+    cursor:pointer;transition:background .12s ease,color .12s ease;}}
+  section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){{background:{BG2};color:{TEXT};}}
+  section[data-testid="stSidebar"] div[role="radiogroup"] label > div{{
+    display:flex;align-items:center;justify-content:center;gap:0;}}
+  section[data-testid="stSidebar"] div[role="radiogroup"] label > div > div:not([data-testid]){{
+    display:none!important;}}
+  section[data-testid="stSidebar"] div[role="radiogroup"] label p{{
+    margin:0;font-size:.84rem;font-weight:600;}}
+
+  /* ── Top bar ───────────────────────────────────────────────── */
+  .st-key-lang_en button,.st-key-lang_sv button,.st-key-acct button{{
+    border:1px solid {BORDER};background:#fff;color:{MUTED};font-weight:600;
+    font-size:.88rem;padding:6px 14px;min-height:0;border-radius:999px;
+    box-shadow:{SHADOW};width:100%;}}
+  .st-key-lang_en button[kind="primary"],.st-key-lang_sv button[kind="primary"]{{
+    color:{TEXT};background:#fff;border-color:{BLUE};}}
+
+  /* ── Section header bar ────────────────────────────────────── */
+  .hx-sec{{display:flex;align-items:center;gap:15px;background:#fff;
+    border-radius:{CARD_R};box-shadow:{SHADOW};padding:13px 22px;
+    margin:22px 0 -4px;position:relative;z-index:2;}}
+  .hx-sec svg{{width:34px;height:34px;flex:0 0 34px;}}
+  .hx-sec .ttl{{font-size:.95rem;font-weight:800;letter-spacing:.06em;
+    text-transform:uppercase;color:{TEXT};}}
+
+  /* ── Panel card wrapping a row of gauges or charts ─────────── */
+  /* The panel card. Streamlit's own container border is switched off — the
+     card is the white background plus the shadow, drawn here. */
+  /* The panel card. Only the innermost wrapper that holds a row of dials —
+     st.fragment wraps the whole tab in one too, and without the :not() that
+     outer wrapper becomes one giant card around everything. */
+  div[data-testid="stLayoutWrapper"]:has(div[data-testid="stBidiComponentRegular"]):not(
+    :has(div[data-testid="stLayoutWrapper"] div[data-testid="stBidiComponentRegular"])){{
+    background:#fff!important;border:none!important;border-radius:{CARD_R};
+    box-shadow:{SHADOW};padding:26px 12px 10px;margin-top:0;}}
+  div[data-testid="stLayoutWrapper"]:has(div[data-testid="stBidiComponentRegular"]) > div{{
+    border:none!important;}}
+  div[data-testid="stPlotlyChart"]{{
+    background:#fff;border-radius:{CARD_R};box-shadow:{SHADOW};padding:12px 10px;}}
+  div[data-testid="stBidiComponentRegular"],
+  div[data-testid="stBidiComponentRegular"] > iframe{{
+    background:transparent!important;border:none!important;}}
+  /* Streamlit's own toolbar — not part of the design */
+  div[data-testid="stToolbar"]{{display:none!important;}}
+
+  /* Gauge heading: label, then the big reading above the dial */
+  .hx-g-lbl{{font-size:.72rem;font-weight:800;letter-spacing:.08em;
+    text-transform:uppercase;color:{MUTED};text-align:center;}}
+  .hx-g-val{{font-size:2.3rem;font-weight:500;color:{TEXT};text-align:center;
+    line-height:1.15;margin-top:2px;}}
+  .hx-g-val span{{font-size:.95rem;font-weight:500;color:{MUTED};margin-left:3px;}}
+  .hx-g-rng{{display:flex;justify-content:space-between;font-size:.66rem;
+    color:{MUTED};padding:0 14px;margin-top:-14px;}}
 
   /* Metric tiles */
-  div[data-testid="metric-container"]{{background:{BG2};border:1px solid {BORDER};border-radius:8px;padding:14px 18px;}}
+  div[data-testid="metric-container"]{{background:{BG2};border:1px solid {BORDER};border-radius:12px;padding:14px 18px;}}
   div[data-testid="metric-container"] label{{font-size:.72rem!important;color:{TEXT}!important;text-transform:uppercase;letter-spacing:.08em;font-weight:700!important;}}
   div[data-testid="metric-container"] [data-testid="stMetricValue"]{{color:{TEXT}!important;font-size:1.5rem!important;font-weight:700!important;}}
 
-  /* Section titles */
   .section-title{{font-size:.68rem;font-weight:700;color:{TEXT};text-transform:uppercase;
     letter-spacing:.1em;margin:20px 0 10px;border-left:3px solid {BLUE};padding-left:10px;}}
 
-  /* Status */
   .status-dot{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;}}
   .ts-text{{font-size:.85rem;color:{TEXT};vertical-align:middle;font-weight:500;}}
 
-  /* Tabs — compact for mobile */
-  .stTabs [data-baseweb="tab-list"]{{gap:0px!important;}}
-  .stTabs [data-baseweb="tab"]{{
-    font-size:.78rem!important;font-weight:700!important;
-    padding:6px 8px!important;white-space:nowrap;
-    color:{TEXT}!important;
-  }}
-  .stTabs [aria-selected="true"]{{
-    color:{BLUE}!important;border-bottom:2px solid {BLUE}!important;
-  }}
-
-  /* Plotly toolbar — diskret, framhävs vid hover/tryck.
-     Får INTE döljas: det är där Zoom out / Reset axes sitter. */
+  /* Plotly toolbar — discreet, but never hidden: Zoom out and Reset axes
+     live there, and without them a zoom is a one-way street. */
   .modebar{{
     opacity:.4!important;transition:opacity .15s ease!important;
     background:rgba(255,255,255,.9)!important;
@@ -277,9 +405,8 @@ st.markdown(f"""<style>
   .modebar-btn .icon path{{fill:{MUTED}!important;}}
   .modebar-btn:hover .icon path,
   .modebar-btn.active .icon path{{fill:{BLUE}!important;}}
-
-  /* Snabbknappar för tidsintervall inuti graferna */
   .rangeselector text{{font-family:Inter!important;}}
+  {_nav_icon_css}
 </style>
 """, unsafe_allow_html=True)
 
@@ -926,102 +1053,135 @@ def echarts_gauge(label, val, mn, mx, unit, green_end=None, warn_start=None, mod
         colors = [[1.0, "#4CAF50"]]
 
     return {
+        # Without this each dial paints its own white rectangle inside the card.
+        "backgroundColor": "transparent",
         "series": [{
             "type": "gauge",
-            "startAngle": 215, "endAngle": -35,
+            # A clean half dial: no ticks, no split lines, rounded arc ends.
+            # The reading sits above it as HTML and the range is printed under
+            # the ends, so the dial itself carries no text at all.
+            "startAngle": 180, "endAngle": 0,
             "min": mn, "max": mx,
-            "splitNumber": 5,
-            "radius": "90%", "center": ["50%", "58%"],
-            "axisLine": {"lineStyle": {"width": 16, "color": colors}},
-            "pointer": {"length": "62%", "width": 5, "itemStyle": {"color": "auto"}},
-            "axisTick":  {"distance": -20, "length": 6,  "lineStyle": {"color": "#fff", "width": 1.5}},
-            "splitLine": {"distance": -24, "length": 14, "lineStyle": {"color": "#fff", "width": 2.5}},
-            "axisLabel": {"color": "inherit", "distance": 26, "fontSize": 10},
-            "detail": {
-                "valueAnimation": True,
-                "formatter": "{value} " + unit,
-                "color": "inherit", "fontSize": 20, "fontWeight": "bold",
-                "offsetCenter": [0, "30%"],
-            },
-            "title": {"show": True, "offsetCenter": [0, "65%"],
-                      "fontSize": 12, "fontWeight": "bold", "color": "#333"},
-            "data": [{"value": round(float(val), decimals), "name": label}],
+            "radius": "118%", "center": ["50%", "88%"],
+            "axisLine": {"roundCap": True,
+                         "lineStyle": {"width": 17, "color": colors}},
+            "pointer": {"length": "58%", "width": 7,
+                        "icon": "path://M2,0 L2,-1 L-2,-1 L-2,0 Z",
+                        "offsetCenter": [0, "2%"],
+                        "itemStyle": {"color": "#1A1D26"}},
+            "anchor": {"show": True, "size": 9, "showAbove": True,
+                       "itemStyle": {"color": "#1A1D26"}},
+            "axisTick":  {"show": False},
+            "splitLine": {"show": False},
+            "axisLabel": {"show": False},
+            "detail": {"show": False},
+            "title": {"show": False},
+            "data": [{"value": round(float(val), decimals)}],
         }]
     }
 
 
+def hx_section(title, icon_file):
+    """Section header drawn as a card with the exported round icon."""
+    ico = _asset(icon_file) or ""
+    st.markdown(f'<div class="hx-sec">{ico}<div class="ttl">{title}</div></div>',
+                unsafe_allow_html=True)
+
+
 def render_echarts_gauge(label, val, mn, mx, unit,
                          green_end=None, warn_start=None,
-                         mode="performance", key=None, height=220):
+                         mode="performance", key=None, height=150):
+    decimals = 0 if unit in ("W/m²", "°C") else (1 if unit == "l/min" else 2)
+    shown = f"{val:.{decimals}f}" if val is not None else "—"
+    st.markdown(f'<div class="hx-g-lbl">{label}</div>'
+                f'<div class="hx-g-val">{shown}<span>{unit}</span></div>',
+                unsafe_allow_html=True)
     opt = echarts_gauge(label, val, mn, mx, unit, green_end, warn_start, mode)
     st_echarts(options=opt, height=f"{height}px",
                key=key or f"g_{label}_{mn}_{mx}")
+    _fmt_end = (lambda x: f"{x:g}")
+    st.markdown(f'<div class="hx-g-rng"><span>{_fmt_end(mn)}{unit if unit=="°C" else ""}</span>'
+                f'<span>{_fmt_end(mx)}{unit if unit=="°C" else ""}</span></div>',
+                unsafe_allow_html=True)
 
-# ── Header ────────────────────────────────────────────────────
-hcols = st.columns([3, 3])
-with hcols[0]:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=160)
-    else:
-        st.markdown(f"<div style='font-size:1.4rem;font-weight:800;color:{TEXT}'>HELIXIS</div>",
-                    unsafe_allow_html=True)
-
-st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:6px 0 4px'>",
-            unsafe_allow_html=True)
-
-# ── Tabs ──────────────────────────────────────────────────────
-lang = st.sidebar.radio("Language / Språk", ["English", "Svenska"],
-                        horizontal=True, label_visibility="collapsed")
-lang = "en" if lang == "English" else "sv"
-T = LANG[lang]
-
-# ── Access control ────────────────────────────────────────────
+# ── Top bar ───────────────────────────────────────────────────
+if "lang" not in st.session_state:
+    st.session_state.lang = "en"
+if "page" not in st.session_state:
+    st.session_state.page = "live"
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-with st.sidebar:
-    st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:8px 0'>",
-                unsafe_allow_html=True)
-    if st.session_state.authenticated:
-        st.markdown(f"<div style='font-size:.75rem;color:{TEAL};margin-bottom:6px'>"
-                    f"✓ Internal access</div>", unsafe_allow_html=True)
-        if st.button("Log out", use_container_width=True):
-            st.session_state.authenticated = False
-            st.rerun()
+hc_logo, _hc_gap, hc_en, hc_sv, hc_acct = st.columns([6, 3, .8, .8, .8],
+                                                     vertical_alignment="center")
+with hc_logo:
+    _logo_svg = _asset("helixis-logo.svg")
+    if _logo_svg:
+        st.markdown(f"<div style='margin:6px 0 2px'>{_logo_svg}</div>",
+                    unsafe_allow_html=True)
     else:
-        with st.expander("🔒 Internal login"):
-            pwd = st.text_input("Password", type="password", label_visibility="collapsed",
-                                placeholder="Enter internal password…")
-            if st.button("Login", use_container_width=True):
+        st.markdown(f"<div style='font-size:1.6rem;font-weight:800;color:{TEXT}'>HELIXIS</div>",
+                    unsafe_allow_html=True)
+with hc_en:
+    if st.button("Eng", key="lang_en", use_container_width=True,
+                 type="primary" if st.session_state.lang == "en" else "secondary"):
+        st.session_state.lang = "en"; st.rerun()
+with hc_sv:
+    if st.button("Sve", key="lang_sv", use_container_width=True,
+                 type="primary" if st.session_state.lang == "sv" else "secondary"):
+        st.session_state.lang = "sv"; st.rerun()
+with hc_acct:
+    with st.popover("👤", use_container_width=True):
+        if st.session_state.authenticated:
+            st.markdown(f"<div style='font-size:.8rem;color:{TEAL}'>✓ Internal access</div>",
+                        unsafe_allow_html=True)
+            if st.button("Log out", use_container_width=True, key="acct_out"):
+                st.session_state.authenticated = False; st.rerun()
+        else:
+            pwd = st.text_input("Password", type="password", key="acct_pwd",
+                                label_visibility="collapsed",
+                                placeholder="Internal password…")
+            if st.button("Login", use_container_width=True, key="acct_in"):
                 if pwd == st.secrets.get("ADMIN_PASSWORD", ""):
-                    st.session_state.authenticated = True
-                    st.rerun()
+                    st.session_state.authenticated = True; st.rerun()
                 else:
                     st.error("Incorrect password")
 
+lang = st.session_state.lang
+T = LANG[lang]
 is_internal = st.session_state.authenticated
+page = st.session_state.page
 
-_tab_labels = [f"🔴 {T['live']}", f"📈 {T['history']}", f"ℹ️ {T['about']}"]
+# ── Left card: status + navigation ────────────────────────────
+# live_dashboard() fills status_slot from inside its 30-second fragment, so
+# the clock in the card keeps ticking without rerunning the whole page.
+_PAGES = [("live", T["live"]), ("hist", T["history"])]
 if is_internal:
-    _tab_labels.insert(2, f"🌤 {T['smhi']}")
+    _PAGES.append(("smhi", T["smhi"]))
+_PAGES.append(("about", T["about"]))
 
-_tabs = st.tabs(_tab_labels)
-tab_live = _tabs[0]
-tab_hist = _tabs[1]
-if is_internal:
-    tab_smhi = _tabs[2]
-    tab_om   = _tabs[3]
-else:
-    tab_smhi = None
-    tab_om   = _tabs[2]
+with st.sidebar:
+    status_slot = st.empty()
+    if page != "live":
+        status_slot.markdown('<div class="hx-status sub">Helixis LC10<br>'
+                             'Eket · Örkelljunga</div>', unsafe_allow_html=True)
+    st.markdown('<hr class="hx-rule">', unsafe_allow_html=True)
+    for _key, _label in _PAGES:
+        if st.button(_label, key=f"nav_{_key}",
+                     use_container_width=True,
+                     type="primary" if page == _key else "secondary"):
+            st.session_state.page = _key; st.rerun()
+        if _key == "live" and page == "live":
+            view_mode = st.radio(T["display_mode"], ["🎯 Gauges", "📋 Kompakt"],
+                                 horizontal=True, label_visibility="collapsed")
+
+if page != "live":
+    view_mode = "🎯 Gauges"
 
 # ════════════════════════════════════════════════════════════════
 # LIVE TAB
 # ════════════════════════════════════════════════════════════════
-with tab_live:
-
-    view_mode = st.radio(T["display_mode"], ["🎯 Gauges", "📋 Kompakt"],
-                         horizontal=True, label_visibility="collapsed")
+if page == "live":
 
     @st.fragment(run_every=30)
     def live_dashboard():
@@ -1048,11 +1208,6 @@ with tab_live:
         pcolor    = RUST if (pres and pres>=5) else SLATE
 
         dot = TEAL if is_live else RUST
-        st.markdown(
-            f'<span class="status-dot" style="background:{dot}"></span>'
-            f'<span class="ts-text">{last_swe.strftime("%H:%M:%S")} '
-            f'{"· LIVE" if is_live else f"· {age_min:.0f} min sedan"}</span>',
-            unsafe_allow_html=True)
 
         # (Down-alert is handled at the top of live_dashboard via check_data_alert,
         #  which works even when fetch_live() is empty during an outage.)
@@ -1060,25 +1215,27 @@ with tab_live:
         df_today_pwr  = fetch_today_power()
         energy_today  = integrate_power(df_today_pwr)
 
+        # Both status lines live in the left card, written from inside this
+        # fragment so the clock keeps ticking without a full page rerun.
         sky_label, sky_icon, sky_color = sky_condition(irr, T)
-        st.markdown(
-            f"<div style='display:flex;align-items:center;gap:10px;margin:6px 0 10px'>"
-            f"<span style='font-size:1.8rem;line-height:1'>{sky_icon}</span>"
-            f"<span style='font-size:1.05rem;font-weight:600;color:{sky_color}'>{sky_label}</span>"
-            f"<span style='font-size:.8rem;color:{MUTED};margin-left:4px'>"
-            f"{'· ' + fmt(irr, 0, 'W/m²') if irr is not None else ''}"
-            f"</span></div>",
-            unsafe_allow_html=True,
-        )
+        status_slot.markdown(
+            f"<div class='hx-status'>"
+            f"<span class='status-dot' style='background:{dot}'></span>"
+            f"{last_swe.strftime('%H:%M:%S')}"
+            f"<span class='sub'> · {'LIVE' if is_live else f'{age_min:.0f} min'}</span>"
+            f"<br><span style='font-size:1rem'>{sky_icon}</span> "
+            f"<span style='color:{sky_color}'>{sky_label.upper()}</span>"
+            f"<span class='sub'>{' · ' + fmt(irr, 0, 'W/m²') if irr is not None else ''}</span>"
+            f"</div>",
+            unsafe_allow_html=True)
 
         if view_mode == "🎯 Gauges":
             # ── Temperatures (semi gauges) ──
-            st.markdown(f'<div class="section-title">{T["temperatures"]}</div>',
-                        unsafe_allow_html=True)
             # The collector gauges only appear when those sensors are actually
             # reporting. The new PLC block does not send temp_right_coll /
             # temp_left_coll, and a gauge with no value silently parks its needle
             # at the scale minimum — 20 °C, which reads like a measurement.
+            hx_section(T["temperatures"], "temperatures-icon.svg")
             temp_specs = [
                 ("collector_r","temp_right_coll", 20,160,"g_cr"),
                 ("collector_l","temp_left_coll",  20,160,"g_cl"),
@@ -1087,20 +1244,22 @@ with tab_live:
                 ("tank",       "temp_tank",       10,100,"g_tk"),
             ]
             temp_specs = [t for t in temp_specs if v.get(t[1]) is not None]
-            tc = st.columns(len(temp_specs) + 1)
-            for col,(lbl_key,sensor,mn,mx,gkey) in zip(tc,temp_specs):
-                with col:
-                    render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
-                        mode="temp", key=gkey)
-            # Outside temperature from SMHI (last stored value)
-            with tc[-1]:
-                render_echarts_gauge("Outside (SMHI)", fetch_outside_temp(), -25, 40,
-                    "°C", mode="temp", key="g_outside")
+            with st.container(border=True):
+                tc = st.columns(len(temp_specs) + 1)
+                for col,(lbl_key,sensor,mn,mx,gkey) in zip(tc,temp_specs):
+                    with col:
+                        render_echarts_gauge(T[lbl_key], v.get(sensor), mn, mx, "°C",
+                            mode="temp", key=gkey)
+                # Outside temperature from SMHI (last stored value)
+                with tc[-1]:
+                    render_echarts_gauge("Outside (SMHI)", fetch_outside_temp(), -25, 40,
+                        "°C", mode="temp", key="g_outside")
 
             # ── Flow, Power, Irradiance, Pressure (semi gauges) ──
-            st.markdown(f'<div class="section-title">{T["section_flow"]}</div>',
-                        unsafe_allow_html=True)
-            g1,g2,g3,g4 = st.columns(4)
+            hx_section(T["section_flow"], "Flow-icon.svg")
+            _flow_card = st.container(border=True)
+            with _flow_card:
+                g1,g2,g3,g4 = st.columns(4)
             with g1:
                 render_echarts_gauge(T["flow"], v.get("flow"), 0, 30, "l/min",
                     mode="performance", key="g_flow")
@@ -1115,8 +1274,7 @@ with tab_live:
                     green_end=4.5, warn_start=5.2, mode="limit", key="g_pres")
 
             # ── Energy (tiles + bar charts) ──
-            st.markdown(f'<div class="section-title">{T["energy"]}</div>',
-                        unsafe_allow_html=True)
+            hx_section(T["energy"], "energy-icon.svg")
             render_tiles([
                 (T["energy_today"], energy_today,             "kWh", 0, 30,   TEAL, 3, None),
                 (T["heat_total"],   mwh_to_kwh(v.get("heat_energy")), "kWh", 0, 9999, BLUE, 3, None),
@@ -1225,8 +1383,7 @@ with tab_live:
             e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
 
         # ── Sol & Effekt — senaste två dagarna med data ───────
-        st.markdown(f'<div class="section-title">{T["recent_2days"]}</div>',
-                    unsafe_allow_html=True)
+        hx_section(T["recent_2days"], "sun-power-icon.svg")
         df_48h = fetch_recent_bucketed(168)  # 7 dagar — hittar senaste dagarna oavsett gap
         if df_48h.empty:
             st.caption(T["no_data_db"])
@@ -1294,8 +1451,7 @@ with tab_live:
 
         # ── Senaste dygnet — temperaturer, ΔT, flöde & tryck (24h) ──
         # Kontinuerlig tidslinje för alla övriga värden. Lokal tid (naive_swe).
-        st.markdown(f'<div class="section-title">{T["last_day_system"]}</div>',
-                    unsafe_allow_html=True)
+        hx_section(T["last_day_system"], "last24hr-icon.svg")
         if df_48h.empty:
             st.caption(T["no_data_db"])
         else:
@@ -1377,7 +1533,7 @@ with tab_live:
 # ════════════════════════════════════════════════════════════════
 # HISTORIK TAB
 # ════════════════════════════════════════════════════════════════
-with tab_hist:
+if page == "hist":
     # ── Översikt — välj period ────────────────────────────────
     today = datetime.now(SWE).date()
 
@@ -1828,8 +1984,8 @@ Ratio M1/M2 reveals the actual cp of the fluid.
 # ════════════════════════════════════════════════════════════════
 # SMHI & ANALYS TAB  (internal only)
 # ════════════════════════════════════════════════════════════════
-if is_internal and tab_smhi is not None:
-     with tab_smhi:
+if is_internal:
+     if page == "smhi":
 
         # ── Förklaringstext ───────────────────────────────────────
         with st.expander("ℹ️ Understanding STRÅNG model data — what each parameter means", expanded=False):
@@ -2476,7 +2632,7 @@ if is_internal and tab_smhi is not None:
                        "kt < 0.3 = heavy cloud cover, DNI too low for meaningful CSP output.")
 
 # ── Om systemet tab ──────────────────────────────────────────
-with tab_om:
+if page == "about":
     c_sys, c_map = st.columns([1, 1])
     with c_sys:
         st.markdown(f"<div class='section-title'>{T['about_spec']}</div>",
